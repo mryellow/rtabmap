@@ -113,6 +113,7 @@ public:
 	void setWorkingDirectory(std::string path);
 	void deleteLocation(int locationId); // Only nodes in STM can be deleted
 	void rejectLoopClosure(int oldId, int newId);
+	void allowLoopClosure(int oldId, int newId);
 	void get3DMap(std::map<int, Signature> & signatures,
 			std::map<int, Transform> & poses,
 			std::multimap<int, Link> & constraints,
@@ -192,10 +193,13 @@ private:
 	bool _startNewMapOnLoopClosure;
 	float _goalReachedRadius; // meters
 	bool _planWithNearNodesLinked;
+	bool _whitelistClosures;
 
 	std::pair<int, float> _loopClosureHypothesis;
 	std::pair<int, float> _highestHypothesis;
 	double _lastProcessTime;
+
+	std::map<std::pair<int, int>, bool> _allowedLoops;
 
 	// Abstract classes containing all loop closure
 	// strategies for a type of signature or configuration.

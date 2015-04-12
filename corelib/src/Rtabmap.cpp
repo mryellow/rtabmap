@@ -109,6 +109,7 @@ Rtabmap::Rtabmap() :
 	_startNewMapOnLoopClosure(Parameters::defaultRtabmapStartNewMapOnLoopClosure()),
 	_goalReachedRadius(Parameters::defaultRGBDGoalReachedRadius()),
 	_planWithNearNodesLinked(Parameters::defaultRGBDPlanWithNearNodesLinked()),
+	_whitelistClosures(Parameters::defaultRtabmapWhitelistClosures()),
 	_loopClosureHypothesis(0,0.0f),
 	_highestHypothesis(0,0.0f),
 	_lastProcessTime(0.0),
@@ -312,6 +313,7 @@ void Rtabmap::close()
 	_lastProcessTime = 0.0;
 	_optimizedPoses.clear();
 	_constraints.clear();
+	_allowedLoops.clear();
 	_mapCorrection.setIdentity();
 	_mapTransform.setIdentity();
 	this->clearPath();
@@ -371,6 +373,7 @@ void Rtabmap::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kRtabmapLoopThr(), _loopThr);
 	Parameters::parse(parameters, Parameters::kRtabmapLoopRatio(), _loopRatio);
 	Parameters::parse(parameters, Parameters::kRtabmapMaxRetrieved(), _maxRetrieved);
+	Parameters::parse(parameters, Parameters::kRtabmapWhitelistClosures(), _whitelistClosures);
 	Parameters::parse(parameters, Parameters::kRGBDMaxLocalRetrieved(), _maxLocalRetrieved);
 	Parameters::parse(parameters, Parameters::kRtabmapStatisticLogsBufferedInRAM(), _statisticLogsBufferedInRAM);
 	Parameters::parse(parameters, Parameters::kRtabmapStatisticLogged(), _statisticLogged);
@@ -1112,6 +1115,15 @@ bool Rtabmap::process(const SensorData & data)
 				if(_highestHypothesis.second >= _loopThr)
 				{
 					rejectedHypothesis = true;
+
+					bool whitelisted = false;
+					if (_whitelistClosures) {
+						std::map<std::pair<int, int>, bool>::iterator iter = _allowedLoops.find(std::make_pair(_memory->getSignature(_highestHypothesis.first)->id(), signature->id()));
+						if (iter != _allowedLoops.end()) {
+							whitelisted = iter->second;
+						}
+					}
+
 					if(posterior.size() <= 2)
 					{
 						// Ignore loop closure if there is only one loop closure hypothesis
@@ -1129,6 +1141,10 @@ bool Rtabmap::process(const SensorData & data)
 					else if(_loopRatio > 0.0f && lastHighestHypothesis.second == 0)
 					{
 						UWARN("rejected hypothesis: last closure hypothesis is null (loop ratio is on)");
+					}
+					else if (_whitelistClosures && !whitelisted)
+					{
+						UWARN("rejected hypothesis: not found in whitelist");
 					}
 					else
 					{
@@ -2094,6 +2110,15 @@ void Rtabmap::rejectLoopClosure(int oldId, int newId)
 			statistics_.addStatistic(rtabmap::Statistics::kLoopRejectedHypothesis(), 1.0f);
 		}
 		statistics_.setLoopClosureId(0);
+	}
+}
+
+void Rtabmap::allowLoopClosure(int oldId, int newId)
+{
+	UDEBUG("");
+	if (oldId > 0 && newId > 0) {
+		UDEBUG("_allowedLoops: oldId=%d newId=%d", oldId, newId);
+		_allowedLoops[std::make_pair(oldId, newId)] = true;
 	}
 }
 
