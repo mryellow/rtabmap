@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -55,6 +55,7 @@ public:
 	void saveSettings(QSettings & settings, const QString & group = "") const;
 	void loadSettings(QSettings & settings, const QString & group = "");
 
+	QRectF sceneRect() const;
 	bool isImageShown() const;
 	bool isImageDepthShown() const;
 	bool isFeaturesShown() const;
@@ -74,10 +75,10 @@ public:
 	void setGraphicsViewScaled(bool scaled);
 	void setBackgroundColor(const QColor & color);
 
-	void setFeatures(const std::multimap<int, cv::KeyPoint> & refWords, const QColor & color = Qt::yellow);
-	void setFeatures(const std::vector<cv::KeyPoint> & features, const QColor & color = Qt::yellow);
-	void addFeature(int id, const cv::KeyPoint & kpt, QColor color);
-	void addLine(float x1, float y1, float x2, float y2, QColor color);
+	void setFeatures(const std::multimap<int, cv::KeyPoint> & refWords, const cv::Mat & depth = cv::Mat(), const QColor & color = Qt::yellow);
+	void setFeatures(const std::vector<cv::KeyPoint> & features, const cv::Mat & depth = cv::Mat(), const QColor & color = Qt::yellow);
+	void addFeature(int id, const cv::KeyPoint & kpt, float depth, QColor color);
+	void addLine(float x1, float y1, float x2, float y2, QColor color, const QString & text = QString());
 	void setImage(const QImage & image);
 	void setImageDepth(const QImage & image);
 	void setFeatureColor(int id, QColor color);
@@ -100,11 +101,12 @@ protected:
 	virtual void resizeEvent(QResizeEvent* event);
 	virtual void contextMenuEvent(QContextMenuEvent * e);
 
+private slots:
+	void sceneRectChanged(const QRectF &rect);
+
 private:
 	void updateOpacity();
-	void computeScaleOffsets(float & scale, float & offsetX, float & offsetY) const;
-	void drawFeatures(QPainter * painter);
-	void drawLines(QPainter * painter);
+	void computeScaleOffsets(const QRect & targetRect, float & scale, float & offsetX, float & offsetY) const;
 
 private:
 	QString _savedFileName;

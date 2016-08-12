@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -57,7 +57,7 @@ public:
 	const QString & path() const {return path_;}
 
 public slots:
-	void addData(const rtabmap::SensorData & data);
+	void addData(const rtabmap::SensorData & data, const Transform & pose = Transform(), const cv::Mat & infMatrix = cv::Mat::eye(6,6,CV_64FC1));
 	void showImage(const cv::Mat & image, const cv::Mat & depth);
 protected:
 	virtual void closeEvent(QCloseEvent* event);

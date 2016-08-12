@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -25,7 +25,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include "rtabmap/core/Camera.h"
+#include "rtabmap/core/CameraRGB.h"
 #include "rtabmap/core/DBReader.h"
 #include "rtabmap/utilite/ULogger.h"
 #include "rtabmap/utilite/UFile.h"
@@ -40,7 +40,7 @@ void showUsage()
 			"rtabmap-camera [option] \n"
 			" Options:\n"
 			"    --device #            USB camera device id (default 0).\n"
-			"    --rate #              Frame rate (default 30 Hz). 0 means as fast as possible.\n"
+			"    --rate #              Frame rate (default 0 Hz). 0 means as fast as possible.\n"
 			"    --path ""             Path to a directory of images or a video file.\n"
 			"    --calibration ""      Calibration file (*.yaml).\n\n");
 	exit(1);
@@ -53,7 +53,7 @@ int main(int argc, char * argv[])
 
 	int device = 0;
 	std::string path;
-	float rate = 30.0f;
+	float rate = 0.0f;
 	std::string calibrationFile;
 	for(int i=1; i<argc; ++i)
 	{
@@ -132,7 +132,6 @@ int main(int argc, char * argv[])
 	}
 
 	rtabmap::Camera * camera = 0;
-	rtabmap::DBReader * dbReader = 0;
 
 	if(!path.empty())
 	{
@@ -140,11 +139,11 @@ int main(int argc, char * argv[])
 		{
 			if(UFile::getExtension(path).compare("db") == 0)
 			{
-				dbReader = new rtabmap::DBReader(path, rate);
+				camera = new rtabmap::DBReader(path, rate);
 			}
 			else
 			{
-				camera = new rtabmap::CameraVideo(path, rate);
+				camera = new rtabmap::CameraVideo(path, false, rate);
 			}
 		}
 		else if(UDirectory::exists(path))
@@ -164,32 +163,20 @@ int main(int argc, char * argv[])
 
 	if(camera)
 	{
-		if(!camera->init())
-		{
-			delete camera;
-			UERROR("Cannot initialize the camera.");
-			return -1;
-		}
-
 		if(!calibrationFile.empty())
 		{
 			UINFO("Set calibration: %s", calibrationFile.c_str());
-			camera->setCalibration(calibrationFile);
 		}
-	}
-
-	if(dbReader)
-	{
-		if(!dbReader->init())
+		if(!camera->init(UDirectory::getDir(calibrationFile), UFile::getName(calibrationFile)))
 		{
-			delete dbReader;
+			delete camera;
 			UERROR("Cannot initialize the camera.");
 			return -1;
 		}
 	}
 
 	cv::Mat rgb;
-	rgb = camera?camera->takeImage():dbReader->getNextData().image();
+	rgb = camera->takeImage().imageRaw();
 	cv::namedWindow("Video", CV_WINDOW_AUTOSIZE); // create window
 	while(!rgb.empty())
 	{
@@ -199,16 +186,12 @@ int main(int argc, char * argv[])
 		if(c == 27)
 			break; // if ESC, break and quit
 
-		rgb = camera?camera->takeImage():dbReader->getNextData().image();
+		rgb = camera->takeImage().imageRaw();
 	}
 	cv::destroyWindow("Video");
 	if(camera)
 	{
 		delete camera;
-	}
-	if(dbReader)
-	{
-		delete dbReader;
 	}
 	return 0;
 }

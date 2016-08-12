@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opencv2/opencv.hpp>
 
 #include <rtabmap/core/CameraModel.h>
+#include <rtabmap/core/StereoCameraModel.h>
 
 #include <rtabmap/utilite/UEventsHandler.h>
 
@@ -47,17 +48,20 @@ class RTABMAPGUI_EXP CalibrationDialog  : public QDialog, public UEventsHandler
 	Q_OBJECT;
 
 public:
-	CalibrationDialog(bool stereo = false, const QString & savingDirectory = ".", QWidget * parent = 0);
+	CalibrationDialog(bool stereo = false, const QString & savingDirectory = ".", bool switchImages = false, QWidget * parent = 0);
 	virtual ~CalibrationDialog();
 
-	bool isCalibrated() const {return models_[0].isValid() && (stereo_?models_[1].isValid():true);}
+	bool isCalibrated() const {return models_[0].isValidForProjection() && (stereo_?models_[1].isValidForProjection():true);}
 	const rtabmap::CameraModel & getLeftCameraModel() const {return models_[0];}
 	const rtabmap::CameraModel & getRightCameraModel() const {return models_[1];}
 	const rtabmap::StereoCameraModel & getStereoCameraModel() const {return stereoModel_;}
+	bool isProcessing() const {return processingData_;}
 
 	void saveSettings(QSettings & settings, const QString & group = "") const;
 	void loadSettings(QSettings & settings, const QString & group = "");
+	void resetSettings();
 
+	void setSwitchedImages(bool switched);
 	void setStereoMode(bool stereo);
 	void setSavingDirectory(const QString & savingDirectory) {savingDirectory_ = savingDirectory;}
 
@@ -65,12 +69,14 @@ public slots:
 	void setBoardWidth(int width);
 	void setBoardHeight(int height);
 	void setSquareSize(double size);
+	void setMaxScale(int scale);
 
 private slots:
 	void processImages(const cv::Mat & imageLeft, const cv::Mat & imageRight, const QString & cameraName);
 	void restart();
 	void calibrate();
 	bool save();
+	void unlock();
 
 protected:
 	virtual void closeEvent(QCloseEvent* event);

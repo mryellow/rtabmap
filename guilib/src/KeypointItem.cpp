@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -34,11 +34,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace rtabmap {
 
-KeypointItem::KeypointItem(int id, const cv::KeyPoint & kpt, const QColor & color, QGraphicsItem * parent) :
+KeypointItem::KeypointItem(int id, const cv::KeyPoint & kpt, float depth, const QColor & color, QGraphicsItem * parent) :
 	QGraphicsEllipseItem(kpt.pt.x-(kpt.size==0?3.0f:kpt.size)/2.0f, kpt.pt.y-(kpt.size==0?3.0f:kpt.size)/2.0f, kpt.size==0?3.0f:kpt.size, kpt.size==0?3.0f:kpt.size, parent),
 	_id(id),
 	_kpt(kpt),
-	_placeHolder(0)
+	_placeHolder(0),
+	_depth(depth)
 {
 	this->setColor(color);
 	this->setAcceptHoverEvents(true);
@@ -69,12 +70,27 @@ void KeypointItem::showDescription()
 		_placeHolder->setBrush(QBrush(QColor ( 0, 0, 0, 170 ))); // Black transparent background
 		QGraphicsTextItem * text = new QGraphicsTextItem(_placeHolder);
 		text->setDefaultTextColor(this->pen().color().rgb());
-		text->setPlainText(QString( "Id = %1\n"
-				"Dir = %3\n"
-				"Hessian = %4\n"
-				"X = %5\n"
-				"Y = %6\n"
-				"Size = %7").arg(_id).arg(_kpt.angle).arg(_kpt.response).arg(_kpt.pt.x).arg(_kpt.pt.y).arg(_kpt.size));
+		if(_depth <= 0)
+		{
+			text->setPlainText(QString( "Id = %1\n"
+					"Dir = %3\n"
+					"Hessian = %4\n"
+					"X = %5\n"
+					"Y = %6\n"
+					"Size = %7\n"
+					"Octave = %8").arg(_id).arg(_kpt.angle).arg(_kpt.response).arg(_kpt.pt.x).arg(_kpt.pt.y).arg(_kpt.size).arg(_kpt.octave));
+		}
+		else
+		{
+			text->setPlainText(QString( "Id = %1\n"
+					"Dir = %3\n"
+					"Hessian = %4\n"
+					"X = %5\n"
+					"Y = %6\n"
+					"Size = %7\n"
+					"Octave = %8\n"
+					"Depth = %9 m").arg(_id).arg(_kpt.angle).arg(_kpt.response).arg(_kpt.pt.x).arg(_kpt.pt.y).arg(_kpt.size).arg(_kpt.octave).arg(_depth));
+		}
 		_placeHolder->setRect(text->boundingRect());
 	}
 

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -26,9 +26,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "AboutDialog.h"
-#include "rtabmap/core/Rtabmap.h"
+#include "rtabmap/core/Parameters.h"
 #include "rtabmap/core/CameraRGBD.h"
-#include "rtabmap/core/Graph.h"
+#include "rtabmap/core/CameraStereo.h"
+#include "rtabmap/core/Optimizer.h"
 #include "ui_aboutDialog.h"
 #include <opencv2/core/version.hpp>
 #include <pcl/pcl_config.h>
@@ -40,12 +41,12 @@ AboutDialog::AboutDialog(QWidget * parent) :
 {
 	_ui = new Ui_aboutDialog();
 	_ui->setupUi(this);
-	QString version = Rtabmap::getVersion().c_str();
+	QString version = Parameters::getVersion().c_str();
 #if DEMO_BUILD
 	version.append(" [DEMO]");
 #endif
 	QString cv_version = CV_VERSION;
-#if RTABMAP_NONFREE == 1
+#ifdef RTABMAP_NONFREE
 	cv_version.append(" [With nonfree]");
 #else
 	cv_version.append(" [Without nonfree]");
@@ -53,13 +54,22 @@ AboutDialog::AboutDialog(QWidget * parent) :
 	_ui->label_version->setText(version);
 	_ui->label_opencv_version->setText(cv_version);
 	_ui->label_pcl_version->setText(PCL_VERSION_PRETTY);
+#ifdef RTABMAP_OCTOMAP
+	_ui->label_octomap->setText("Yes");
+#else
+	_ui->label_octomap->setText("No");
+#endif
 	_ui->label_freenect->setText(CameraFreenect::available()?"Yes":"No");
 	_ui->label_openni2->setText(CameraOpenNI2::available()?"Yes":"No");
-	_ui->label_openni2->setText(CameraFreenect2::available()?"Yes":"No");
-	_ui->label_openni2->setText(CameraStereoDC1394::available()?"Yes":"No");
-	_ui->label_openni2->setText(CameraStereoFlyCapture2::available()?"Yes":"No");
+	_ui->label_freenect2->setText(CameraFreenect2::available()?"Yes":"No");
+	_ui->label_dc1394->setText(CameraStereoDC1394::available()?"Yes":"No");
+	_ui->label_flycapture2->setText(CameraStereoFlyCapture2::available()?"Yes":"No");
+	_ui->label_zed->setText(CameraStereoZed::available()?"Yes":"No");
 
-	_ui->label_g2o->setText(graph::G2OOptimizer::available()?"Yes":"No");
+	_ui->label_g2o->setText(Optimizer::isAvailable(Optimizer::kTypeG2O)?"Yes":"No");
+	_ui->label_gtsam->setText(Optimizer::isAvailable(Optimizer::kTypeGTSAM)?"Yes":"No");
+	_ui->label_cvsba->setText(Optimizer::isAvailable(Optimizer::kTypeCVSBA)?"Yes":"No");
+
 }
 
 AboutDialog::~AboutDialog()

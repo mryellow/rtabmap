@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define EXPORTDIALOG_H_
 
 #include <QDialog>
+#include <QSettings>
 
 class Ui_ExportDialog;
 
@@ -43,18 +44,25 @@ public:
 
 	virtual ~ExportDialog();
 
+	void saveSettings(QSettings & settings, const QString & group) const;
+	void loadSettings(QSettings & settings, const QString & group);
+
 	QString outputPath() const;
 	int framesIgnored() const;
+	double targetFramerate() const;
+	int sessionExported() const;
 	bool isRgbExported() const;
 	bool isDepthExported() const;
 	bool isDepth2dExported() const;
 	bool isOdomExported() const;
+	bool isUserDataExported() const;
 
 signals:
 	void configChanged();
 
 private slots:
 	void getPath();
+	void restoreDefaults();
 
 private:
 	Ui_ExportDialog * _ui;
