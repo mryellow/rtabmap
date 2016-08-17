@@ -106,6 +106,7 @@ Rtabmap::Rtabmap() :
 	_optimizationMaxLinearError(Parameters::defaultRGBDOptimizeMaxError()),
 	_startNewMapOnLoopClosure(Parameters::defaultRtabmapStartNewMapOnLoopClosure()),
 	_goalReachedRadius(Parameters::defaultRGBDGoalReachedRadius()),
+	_whitelistClosures(Parameters::defaultRtabmapWhitelistClosures()),
 	_goalsSavedInUserData(Parameters::defaultRGBDGoalsSavedInUserData()),
 	_pathStuckIterations(Parameters::defaultRGBDPlanStuckIterations()),
 	_pathLinearVelocity(Parameters::defaultRGBDPlanLinearVelocity()),
@@ -327,6 +328,7 @@ void Rtabmap::close(bool databaseSaved)
 	_someNodesHaveBeenTransferred = false;
 	_optimizedPoses.clear();
 	_constraints.clear();
+	_allowedLoops.clear();
 	_mapCorrection.setIdentity();
 	_lastLocalizationPose.setNull();
 	_lastLocalizationNodeId = 0;
@@ -396,6 +398,7 @@ void Rtabmap::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kRtabmapLoopThr(), _loopThr);
 	Parameters::parse(parameters, Parameters::kRtabmapLoopRatio(), _loopRatio);
 	Parameters::parse(parameters, Parameters::kRtabmapMaxRetrieved(), _maxRetrieved);
+	Parameters::parse(parameters, Parameters::kRtabmapWhitelistClosures(), _whitelistClosures);
 	Parameters::parse(parameters, Parameters::kRGBDMaxLocalRetrieved(), _maxLocalRetrieved);
 	Parameters::parse(parameters, Parameters::kMemImageKept(), _rawDataKept);
 	Parameters::parse(parameters, Parameters::kRGBDEnabled(), _rgbdSlamMode);
@@ -1306,6 +1309,15 @@ bool Rtabmap::process(
 				if(_highestHypothesis.second >= _loopThr)
 				{
 					rejectedHypothesis = true;
+
+					bool whitelisted = false;
+					if (_whitelistClosures) {
+						std::map<std::pair<int, int>, bool>::iterator iter = _allowedLoops.find(std::make_pair(_memory->getSignature(_highestHypothesis.first)->id(), signature->id()));
+						if (iter != _allowedLoops.end()) {
+							whitelisted = iter->second;
+						}
+					}
+
 					if(posterior.size() <= 2)
 					{
 						// Ignore loop closure if there is only one loop closure hypothesis
@@ -1323,6 +1335,10 @@ bool Rtabmap::process(
 					else if(_loopRatio > 0.0f && lastHighestHypothesis.second == 0)
 					{
 						UWARN("rejected hypothesis: last closure hypothesis is null (loop ratio is on)");
+					}
+					else if (_whitelistClosures && !whitelisted)
+					{
+						UWARN("rejected hypothesis: not found in whitelist");
 					}
 					else
 					{
@@ -2083,7 +2099,7 @@ bool Rtabmap::process(
 
 			UINFO("Update map correction");
 			std::map<int, Transform> poses = _optimizedPoses;
-			
+
 			// if _optimizeFromGraphEnd parameter just changed state, don't use optimized poses as guess
 			float normMapCorrection = _mapCorrection.getNormSquared(); // use distance for identity detection
 			if((normMapCorrection > 0.001f && _optimizeFromGraphEnd) ||
@@ -2676,6 +2692,15 @@ void Rtabmap::rejectLoopClosure(int oldId, int newId)
 			statistics_.addStatistic(rtabmap::Statistics::kLoopRejectedHypothesis(), 1.0f);
 		}
 		statistics_.setLoopClosureId(0);
+	}
+}
+
+void Rtabmap::allowLoopClosure(int oldId, int newId)
+{
+	UDEBUG("");
+	if (oldId > 0 && newId > 0) {
+		UDEBUG("_allowedLoops: oldId=%d newId=%d", oldId, newId);
+		_allowedLoops[std::make_pair(oldId, newId)] = true;
 	}
 }
 
@@ -3929,7 +3954,7 @@ void Rtabmap::updateGoalIndex()
 						this->clearPath(-1);
 						return;
 					}
-				}				
+				}
 			}
 			else if(!isStuck)
 			{

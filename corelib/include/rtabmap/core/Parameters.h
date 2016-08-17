@@ -183,6 +183,7 @@ class RTABMAP_EXP Parameters
 	RTABMAP_PARAM(Rtabmap, StatisticLogged,   	         bool, false, "Logging enabled.");
 	RTABMAP_PARAM(Rtabmap, StatisticLoggedHeaders,   	 bool, true, "Add column header description to log files.");
 	RTABMAP_PARAM(Rtabmap, StartNewMapOnLoopClosure,     bool, false, "Start a new map only if there is a global loop closure with a previous map.");
+	RTABMAP_PARAM(Rtabmap, WhitelistClosures,   		 bool, false, "Whitelist global loop closures.");
 
 	// Hypotheses selection
 	RTABMAP_PARAM(Rtabmap, LoopThr,    	     float, 0.11, 	"Loop closing threshold.");

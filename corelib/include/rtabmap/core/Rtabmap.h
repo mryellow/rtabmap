@@ -116,6 +116,7 @@ public:
 	const ParametersMap & getParameters() const {return _parameters;}
 	void setWorkingDirectory(std::string path);
 	void rejectLoopClosure(int oldId, int newId);
+	void allowLoopClosure(int oldId, int newId);
 	void setOptimizedPoses(const std::map<int, Transform> & poses);
 	void get3DMap(std::map<int, Signature> & signatures,
 			std::map<int, Transform> & poses,
@@ -203,6 +204,7 @@ private:
 	float _optimizationMaxLinearError;
 	bool _startNewMapOnLoopClosure;
 	float _goalReachedRadius; // meters
+	bool _whitelistClosures;
 	bool _goalsSavedInUserData;
 	int _pathStuckIterations;
 	float _pathLinearVelocity;
@@ -213,6 +215,8 @@ private:
 	double _lastProcessTime;
 	bool _someNodesHaveBeenTransferred;
 	float _distanceTravelled;
+
+	std::map<std::pair<int, int>, bool> _allowedLoops;
 
 	// Abstract classes containing all loop closure
 	// strategies for a type of signature or configuration.
