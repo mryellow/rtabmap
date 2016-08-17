@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -207,10 +207,10 @@ private:
 			{
 				double stamp = UTimer::now();
 
-				// Create user data [level, stamp] with the value (int = 4 bytes) and a timestamp (double = 8 bytes)
-				std::vector<unsigned char> data(sizeof(int) + sizeof(double));
-				memcpy(data.data(), &dBm, sizeof(int));
-				memcpy(data.data()+sizeof(int), &stamp, sizeof(double));
+				// Create user data [level, stamp] with the value and a timestamp
+				cv::Mat data(1, 2, CV_64FC1);
+				data.at<double>(0) = double(dBm);
+				data.at<double>(1) = stamp;
 				this->post(new UserDataEvent(data));
 				//UWARN("posting level %d dBm", dBm);
 			}

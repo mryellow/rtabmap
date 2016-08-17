@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +114,11 @@ std::string uNumber2Str(double number)
 	return s.str();
 }
 
+int uStr2Int(const std::string & str)
+{
+	return atoi(str.c_str());
+}
+
 float uStr2Float(const std::string & str)
 {
 	float value = 0.0f;
@@ -148,6 +154,34 @@ std::string uBool2Str(bool boolean)
 bool uStr2Bool(const char * str)
 {
 	return !(str && (strcmp(str, "false") == 0 || strcmp(str, "FALSE") == 0 || strcmp(str, "0") == 0));
+}
+
+bool uStr2Bool(const std::string & str)
+{
+	return !(str.compare("false") == 0 || str.compare("FALSE") == 0 || str.compare("0") == 0);
+}
+
+std::vector<unsigned char> uStr2Bytes(const std::string & str)
+{
+	std::vector<unsigned char> bytes(str.size()+1);
+	memcpy(bytes.data(), str.data(), str.size());
+	bytes[bytes.size()-1] = '\0'; // null character
+	return bytes;
+}
+
+std::string uBytes2Str(const std::vector<unsigned char> & bytes)
+{
+	if(bytes.size())
+	{
+		if(bytes[bytes.size()-1] != '\0')
+		{
+			std::vector<unsigned char> tmp = bytes;
+			tmp.push_back('\0');
+			return std::string((const char *)tmp.data());
+		}
+		return std::string((const char *)bytes.data());
+	}
+	return std::string();
 }
 
 std::string uBytes2Hex(const char * bytes, unsigned int bytesLen)

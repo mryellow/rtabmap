@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -25,82 +25,167 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <rtabmap/core/OdometryF2M.h>
 #include "rtabmap/core/Odometry.h"
+#include "rtabmap/core/OdometryF2F.h"
+#include "rtabmap/core/OdometryInfo.h"
+#include "rtabmap/core/util3d.h"
+#include "rtabmap/core/util3d_mapping.h"
+#include "rtabmap/core/util3d_filtering.h"
+#include "rtabmap/utilite/ULogger.h"
+#include "rtabmap/utilite/UTimer.h"
+#include "rtabmap/utilite/UConversion.h"
+#include "rtabmap/core/ParticleFilter.h"
+#include "rtabmap/core/util2d.h"
 
-#include <rtabmap/utilite/ULogger.h>
-#include <rtabmap/utilite/UTimer.h>
-#include <rtabmap/utilite/UConversion.h>
-#include <rtabmap/utilite/UMath.h>
-
-#include <rtabmap/core/OdometryEvent.h>
-#include <rtabmap/core/CameraEvent.h>
-#include <rtabmap/core/util3d.h>
-#include <rtabmap/core/Features2d.h>
-
-#include <rtabmap/core/Memory.h>
-#include <rtabmap/core/VWDictionary.h>
-#include "rtabmap/core/Signature.h"
-#include "rtabmap/core/Features2d.h"
-
-#include <pcl/io/pcd_io.h>
-#include <pcl/common/transforms.h>
-#include <pcl/common/distances.h>
-
-#include <opencv2/gpu/gpu.hpp>
-
-#if _MSC_VER
-	#define ISFINITE(value) _finite(value)
-#else
-	#define ISFINITE(value) std::isfinite(value)
-#endif
+#include <pcl/pcl_base.h>
 
 namespace rtabmap {
 
+Odometry * Odometry::create(const ParametersMap & parameters)
+{
+	int odomTypeInt = Parameters::defaultOdomStrategy();
+	Parameters::parse(parameters, Parameters::kOdomStrategy(), odomTypeInt);
+	Odometry::Type type = (Odometry::Type)odomTypeInt;
+	return create(type, parameters);
+}
+
+Odometry * Odometry::create(Odometry::Type & type, const ParametersMap & parameters)
+{
+	UDEBUG("type=%d", (int)type);
+	Odometry * odometry = 0;
+	switch(type)
+	{
+	case Odometry::kTypeF2F:
+		odometry = new OdometryF2F(parameters);
+		break;
+	default:
+		odometry = new OdometryF2M(parameters);
+		type = Odometry::kTypeLocalMap;
+		break;
+	}
+	return odometry;
+}
+
 Odometry::Odometry(const rtabmap::ParametersMap & parameters) :
-		_maxFeatures(Parameters::defaultOdomMaxFeatures()),
-		_roiRatios(Parameters::defaultOdomRoiRatios()),
-		_minInliers(Parameters::defaultOdomMinInliers()),
-		_inlierDistance(Parameters::defaultOdomInlierDistance()),
-		_iterations(Parameters::defaultOdomIterations()),
-		_refineIterations(Parameters::defaultOdomRefineIterations()),
-		_maxDepth(Parameters::defaultOdomMaxDepth()),
 		_resetCountdown(Parameters::defaultOdomResetCountdown()),
-		_force2D(Parameters::defaultOdomForce2D()),
+		_force3DoF(Parameters::defaultRegForce3DoF()),
+		_holonomic(Parameters::defaultOdomHolonomic()),
+		guessFromMotion_(Parameters::defaultOdomGuessMotion()),
+		_filteringStrategy(Parameters::defaultOdomFilteringStrategy()),
+		_particleSize(Parameters::defaultOdomParticleSize()),
+		_particleNoiseT(Parameters::defaultOdomParticleNoiseT()),
+		_particleLambdaT(Parameters::defaultOdomParticleLambdaT()),
+		_particleNoiseR(Parameters::defaultOdomParticleNoiseR()),
+		_particleLambdaR(Parameters::defaultOdomParticleLambdaR()),
 		_fillInfoData(Parameters::defaultOdomFillInfoData()),
-		_pnpEstimation(Parameters::defaultOdomPnPEstimation()),
-		_pnpReprojError(Parameters::defaultOdomPnPReprojError()),
-		_pnpFlags(Parameters::defaultOdomPnPFlags()),
-		_resetCurrentCount(0)
+		_kalmanProcessNoise(Parameters::defaultOdomKalmanProcessNoise()),
+		_kalmanMeasurementNoise(Parameters::defaultOdomKalmanMeasurementNoise()),
+		_imageDecimation(Parameters::defaultOdomImageDecimation()),
+		_alignWithGround(Parameters::defaultOdomAlignWithGround()),
+		_pose(Transform::getIdentity()),
+		_resetCurrentCount(0),
+		previousStamp_(0),
+		distanceTravelled_(0)
 {
 	Parameters::parse(parameters, Parameters::kOdomResetCountdown(), _resetCountdown);
-	Parameters::parse(parameters, Parameters::kOdomMinInliers(), _minInliers);
-	Parameters::parse(parameters, Parameters::kOdomInlierDistance(), _inlierDistance);
-	Parameters::parse(parameters, Parameters::kOdomIterations(), _iterations);
-	Parameters::parse(parameters, Parameters::kOdomRefineIterations(), _refineIterations);
-	Parameters::parse(parameters, Parameters::kOdomMaxDepth(), _maxDepth);
-	Parameters::parse(parameters, Parameters::kOdomMaxFeatures(), _maxFeatures);
-	Parameters::parse(parameters, Parameters::kOdomRoiRatios(), _roiRatios);
-	Parameters::parse(parameters, Parameters::kOdomForce2D(), _force2D);
+
+	Parameters::parse(parameters, Parameters::kRegForce3DoF(), _force3DoF);
+	Parameters::parse(parameters, Parameters::kOdomHolonomic(), _holonomic);
+	Parameters::parse(parameters, Parameters::kOdomGuessMotion(), guessFromMotion_);
 	Parameters::parse(parameters, Parameters::kOdomFillInfoData(), _fillInfoData);
-	Parameters::parse(parameters, Parameters::kOdomPnPEstimation(), _pnpEstimation);
-	Parameters::parse(parameters, Parameters::kOdomPnPReprojError(), _pnpReprojError);
-	Parameters::parse(parameters, Parameters::kOdomPnPFlags(), _pnpFlags);
-	UASSERT(_pnpFlags>=0 && _pnpFlags <=2);
+	Parameters::parse(parameters, Parameters::kOdomFilteringStrategy(), _filteringStrategy);
+	Parameters::parse(parameters, Parameters::kOdomParticleSize(), _particleSize);
+	Parameters::parse(parameters, Parameters::kOdomParticleNoiseT(), _particleNoiseT);
+	Parameters::parse(parameters, Parameters::kOdomParticleLambdaT(), _particleLambdaT);
+	Parameters::parse(parameters, Parameters::kOdomParticleNoiseR(), _particleNoiseR);
+	Parameters::parse(parameters, Parameters::kOdomParticleLambdaR(), _particleLambdaR);
+	UASSERT(_particleNoiseT>0);
+	UASSERT(_particleLambdaT>0);
+	UASSERT(_particleNoiseR>0);
+	UASSERT(_particleLambdaR>0);
+	Parameters::parse(parameters, Parameters::kOdomKalmanProcessNoise(), _kalmanProcessNoise);
+	Parameters::parse(parameters, Parameters::kOdomKalmanMeasurementNoise(), _kalmanMeasurementNoise);
+	Parameters::parse(parameters, Parameters::kOdomImageDecimation(), _imageDecimation);
+	Parameters::parse(parameters, Parameters::kOdomAlignWithGround(), _alignWithGround);
+	UASSERT(_imageDecimation>=1);
+
+	if(_filteringStrategy == 2)
+	{
+		// Initialize the Particle filters
+		particleFilters_.resize(6);
+		for(unsigned int i = 0; i<particleFilters_.size(); ++i)
+		{
+			if(i<3)
+			{
+				particleFilters_[i] = new ParticleFilter(_particleSize, _particleNoiseT, _particleLambdaT);
+			}
+			else
+			{
+				particleFilters_[i] = new ParticleFilter(_particleSize, _particleNoiseR, _particleLambdaR);
+			}
+		}
+	}
+	else if(_filteringStrategy == 1)
+	{
+		initKalmanFilter();
+	}
+}
+
+Odometry::~Odometry()
+{
+	for(unsigned int i=0; i<particleFilters_.size(); ++i)
+	{
+		delete particleFilters_[i];
+	}
+	particleFilters_.clear();
 }
 
 void Odometry::reset(const Transform & initialPose)
 {
+	UASSERT(!initialPose.isNull());
+	previousVelocityTransform_.setNull();
+	previousGroundTruthPose_.setNull();
 	_resetCurrentCount = 0;
-	if(_force2D)
+	previousStamp_ = 0;
+	distanceTravelled_ = 0;
+	if(_force3DoF || particleFilters_.size())
 	{
 		float x,y,z, roll,pitch,yaw;
 		initialPose.getTranslationAndEulerAngles(x, y, z, roll, pitch, yaw);
-		if(z != 0.0f || roll != 0.0f || yaw != 0.0f)
+
+		if(_force3DoF)
 		{
-			UWARN("Force2D=true and the initial pose contains z, roll or pitch values (%s). They are set to null.", initialPose.prettyPrint().c_str());
+			if(z != 0.0f || roll != 0.0f || pitch != 0.0f)
+			{
+				UWARN("Force2D=true and the initial pose contains z, roll or pitch values (%s). They are set to null.", initialPose.prettyPrint().c_str());
+			}
+			z = 0;
+			roll = 0;
+			pitch = 0;
+			Transform pose(x, y, z, roll, pitch, yaw);
+			_pose = pose;
 		}
-		Transform pose(x, y, 0, 0, 0, yaw);
-		_pose = pose;
+		else
+		{
+			_pose = initialPose;
+		}
+
+		if(particleFilters_.size())
+		{
+			UASSERT(particleFilters_.size() == 6);
+			particleFilters_[0]->init(x);
+			particleFilters_[1]->init(y);
+			particleFilters_[2]->init(z);
+			particleFilters_[3]->init(roll);
+			particleFilters_[4]->init(pitch);
+			particleFilters_[5]->init(yaw);
+		}
+
+		if(_filteringStrategy == 1)
+		{
+			initKalmanFilter(initialPose);
+		}
 	}
 	else
 	{
@@ -108,44 +193,322 @@ void Odometry::reset(const Transform & initialPose)
 	}
 }
 
-Transform Odometry::process(const SensorData & data, OdometryInfo * info)
+Transform Odometry::process(SensorData & data, OdometryInfo * info)
 {
-	if(_pose.isNull())
+	return process(data, Transform(), info);
+}
+
+Transform Odometry::process(SensorData & data, const Transform & guessIn, OdometryInfo * info)
+{
+	UASSERT(!data.imageRaw().empty());
+
+	// Ground alignment
+	if(_pose.isIdentity() && _alignWithGround)
 	{
-		_pose.setIdentity(); // initialized
+		UTimer alignTimer;
+		pcl::IndicesPtr indices(new std::vector<int>);
+		pcl::IndicesPtr ground, obstacles;
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = util3d::cloudFromSensorData(data, 1, 0, 0, indices.get());
+		cloud = util3d::voxelize(cloud, indices, 0.01);
+		bool success = false;
+		if(cloud->size())
+		{
+			util3d::segmentObstaclesFromGround<pcl::PointXYZ>(cloud, ground, obstacles, 20, M_PI/4.0f, 0.02, 200, true);
+			if(ground->size())
+			{
+				pcl::ModelCoefficients coefficients;
+				util3d::extractPlane(cloud, ground, 0.02, 100, &coefficients);
+				if(coefficients.values.at(3) >= 0)
+				{
+					UWARN("Ground detected! coefficients=(%f, %f, %f, %f) time=%fs",
+							coefficients.values.at(0),
+							coefficients.values.at(1),
+							coefficients.values.at(2),
+							coefficients.values.at(3),
+							alignTimer.ticks());
+				}
+				else
+				{
+					UWARN("Ceiling detected! coefficients=(%f, %f, %f, %f) time=%fs",
+							coefficients.values.at(0),
+							coefficients.values.at(1),
+							coefficients.values.at(2),
+							coefficients.values.at(3),
+							alignTimer.ticks());
+				}
+				Eigen::Vector3f n(coefficients.values.at(0), coefficients.values.at(1), coefficients.values.at(2));
+				Eigen::Vector3f z(0,0,1);
+				//get rotation from z to n;
+				Eigen::Matrix3f R;
+				R = Eigen::Quaternionf().setFromTwoVectors(n,z);
+				Transform rotation(
+						R(0,0), R(0,1), R(0,2), 0,
+						R(1,0), R(1,1), R(1,2), 0,
+						R(2,0), R(2,1), R(2,2), coefficients.values.at(3));
+				_pose *= rotation;
+				success = true;
+			}
+		}
+		if(!success)
+		{
+			UERROR("Odometry failed to detect the ground. You have this "
+					"error because parameter \"Odom/AlignWithGround\" is true. "
+					"Make sure the camera is seeing the ground (e.g., tilt ~30 "
+					"degrees toward the ground).");
+		}
 	}
 
-	UASSERT(!data.image().empty());
-	UASSERT(!data.depthOrRightImage().empty());
-
-	if(data.fx() <= 0 || data.fyOrBaseline() <= 0)
+	if(!data.stereoCameraModel().isValidForProjection() &&
+	   (data.cameraModels().size() == 0 || !data.cameraModels()[0].isValidForProjection()))
 	{
-		UERROR("Rectified images required! Calibrate your camera. (fx=%f, fy/baseline=%f, cx=%f, cy=%f)",
-				data.fx(), data.fyOrBaseline(), data.cx(), data.cy());
+		UERROR("Rectified images required! Calibrate your camera.");
 		return Transform();
 	}
 
+	double dt = previousStamp_>0.0f?data.stamp() - previousStamp_:0.0;
+	Transform guess = dt && guessFromMotion_ && !previousVelocityTransform_.isNull()?Transform::getIdentity():Transform();
+	UASSERT_MSG(dt>0.0 || (dt == 0.0 && previousVelocityTransform_.isNull()), uFormat("dt=%f previous transform=%s", dt, previousVelocityTransform_.prettyPrint().c_str()).c_str());
+	if(!previousVelocityTransform_.isNull())
+	{
+		if(guessFromMotion_)
+		{
+			if(_filteringStrategy == 1)
+			{
+				// use Kalman predict transform
+				float vx,vy,vz, vroll,vpitch,vyaw;
+				predictKalmanFilter(dt, &vx,&vy,&vz,&vroll,&vpitch,&vyaw);
+				guess = Transform(vx*dt, vy*dt, vz*dt, vroll*dt, vpitch*dt, vyaw*dt);
+			}
+			else
+			{
+				float vx,vy,vz, vroll,vpitch,vyaw;
+				previousVelocityTransform_.getTranslationAndEulerAngles(vx,vy,vz, vroll,vpitch,vyaw);
+				guess = Transform(vx*dt, vy*dt, vz*dt, vroll*dt, vpitch*dt, vyaw*dt);
+			}
+		}
+		else if(_filteringStrategy == 1)
+		{
+			predictKalmanFilter(dt);
+		}
+	}
+
+	if(!guessIn.isNull())
+	{
+		guess = guessIn;
+	}
+
 	UTimer time;
-	Transform t = this->computeTransform(data, info);
+	Transform t;
+	if(_imageDecimation > 1)
+	{
+		// Decimation of images with calibrations
+		SensorData decimatedData = data;
+		decimatedData.setImageRaw(util2d::decimate(decimatedData.imageRaw(), _imageDecimation));
+		decimatedData.setDepthOrRightRaw(util2d::decimate(decimatedData.depthOrRightRaw(), _imageDecimation));
+		std::vector<CameraModel> cameraModels = decimatedData.cameraModels();
+		for(unsigned int i=0; i<cameraModels.size(); ++i)
+		{
+			cameraModels[i] = cameraModels[i].scaled(1.0/double(_imageDecimation));
+		}
+		decimatedData.setCameraModels(cameraModels);
+		StereoCameraModel stereoModel = decimatedData.stereoCameraModel();
+		if(stereoModel.isValidForProjection())
+		{
+			stereoModel.scale(1.0/double(_imageDecimation));
+		}
+		decimatedData.setStereoCameraModel(stereoModel);
+
+		// compute transform
+		t = this->computeTransform(decimatedData, guess, info);
+
+		// transform back the keypoints in the original image
+		std::vector<cv::KeyPoint> kpts = decimatedData.keypoints();
+		double log2value = log(double(_imageDecimation))/log(2.0);
+		for(unsigned int i=0; i<kpts.size(); ++i)
+		{
+			kpts[i].pt.x *= _imageDecimation;
+			kpts[i].pt.y *= _imageDecimation;
+			kpts[i].size *= _imageDecimation;
+			kpts[i].octave += log2value;
+		}
+		data.setFeatures(kpts, decimatedData.descriptors());
+
+		if(info)
+		{
+			UASSERT(info->newCorners.size() == info->refCorners.size());
+			for(unsigned int i=0; i<info->newCorners.size(); ++i)
+			{
+				info->refCorners[i].x *= _imageDecimation;
+				info->refCorners[i].y *= _imageDecimation;
+				info->newCorners[i].x *= _imageDecimation;
+				info->newCorners[i].y *= _imageDecimation;
+			}
+			for(std::multimap<int, cv::KeyPoint>::iterator iter=info->words.begin(); iter!=info->words.end(); ++iter)
+			{
+				iter->second.pt.x *= _imageDecimation;
+				iter->second.pt.y *= _imageDecimation;
+				iter->second.size *= _imageDecimation;
+				iter->second.octave += log2value;
+			}
+		}
+	}
+	else
+	{
+		t = this->computeTransform(data, guess, info);
+	}
 
 	if(info)
 	{
-		info->time = time.elapsed();
+		info->timeEstimation = time.ticks();
 		info->lost = t.isNull();
+		info->stamp = data.stamp();
+		info->interval = dt;
+		info->transform = t;
+
+		if(!data.groundTruth().isNull())
+		{
+			if(!previousGroundTruthPose_.isNull())
+			{
+				info->transformGroundTruth = previousGroundTruthPose_.inverse() * data.groundTruth();
+			}
+			previousGroundTruthPose_ = data.groundTruth();
+		}
 	}
 
 	if(!t.isNull())
 	{
 		_resetCurrentCount = _resetCountdown;
 
-		if(_force2D)
+		float vx,vy,vz, vroll,vpitch,vyaw;
+		t.getTranslationAndEulerAngles(vx,vy,vz, vroll,vpitch,vyaw);
+
+		// transform to velocity
+		if(dt)
 		{
-			float x,y,z, roll,pitch,yaw;
-			t.getTranslationAndEulerAngles(x, y, z, roll, pitch, yaw);
-			t = Transform(x,y,0, 0,0,yaw);
+			vx /= dt;
+			vy /= dt;
+			vz /= dt;
+			vroll /= dt;
+			vpitch /= dt;
+			vyaw /= dt;
 		}
 
-		return _pose *= t; // updated
+		if(_force3DoF || !_holonomic || particleFilters_.size() || _filteringStrategy==1)
+		{
+			if(_filteringStrategy == 1)
+			{
+				if(previousVelocityTransform_.isNull())
+				{
+					// reset Kalman
+					if(dt)
+					{
+						initKalmanFilter(t, vx,vy,vz,vroll,vpitch,vyaw);
+					}
+					else
+					{
+						initKalmanFilter(t);
+					}
+				}
+				else
+				{
+					// Kalman filtering
+					updateKalmanFilter(vx,vy,vz,vroll,vpitch,vyaw);
+				}
+			}
+			else if(particleFilters_.size())
+			{
+				// Particle filtering
+				UASSERT(particleFilters_.size()==6);
+				if(previousVelocityTransform_.isNull())
+				{
+					particleFilters_[0]->init(vx);
+					particleFilters_[1]->init(vy);
+					particleFilters_[2]->init(vz);
+					particleFilters_[3]->init(vroll);
+					particleFilters_[4]->init(vpitch);
+					particleFilters_[5]->init(vyaw);
+				}
+				else
+				{
+					vx = particleFilters_[0]->filter(vx);
+					vy = particleFilters_[1]->filter(vy);
+					vyaw = particleFilters_[5]->filter(vyaw);
+
+					if(!_holonomic)
+					{
+						// arc trajectory around ICR
+						float tmpY = vyaw!=0.0f ? vx / tan((CV_PI-vyaw)/2.0f) : 0.0f;
+						if(fabs(tmpY) < fabs(vy) || (tmpY<=0 && vy >=0) || (tmpY>=0 && vy<=0))
+						{
+							vy = tmpY;
+						}
+						else
+						{
+							vyaw = (atan(vx/vy)*2.0f-CV_PI)*-1;
+						}
+					}
+
+					if(!_force3DoF)
+					{
+						vz = particleFilters_[2]->filter(vz);
+						vroll = particleFilters_[3]->filter(vroll);
+						vpitch = particleFilters_[4]->filter(vpitch);
+					}
+				}
+
+				if(info)
+				{
+					info->timeParticleFiltering = time.ticks();
+				}
+
+				if(_force3DoF)
+				{
+					vz = 0.0f;
+					vroll = 0.0f;
+					vpitch = 0.0f;
+				}
+			}
+			else if(!_holonomic)
+			{
+				// arc trajectory around ICR
+				vy = vyaw!=0.0f ? vx / tan((CV_PI-vyaw)/2.0f) : 0.0f;
+				if(_force3DoF)
+				{
+					vz = 0.0f;
+					vroll = 0.0f;
+					vpitch = 0.0f;
+				}
+			}
+
+			if(dt)
+			{
+				t = Transform(vx*dt, vy*dt, vz*dt, vroll*dt, vpitch*dt, vyaw*dt);
+			}
+			else
+			{
+				t = Transform(vx, vy, vz, vroll, vpitch, vyaw);
+			}
+
+			if(info)
+			{
+				info->transformFiltered = t;
+			}
+		}
+
+		previousStamp_ = data.stamp();
+		previousVelocityTransform_.setNull();
+		if(dt)
+		{
+			previousVelocityTransform_ = Transform(vx, vy, vz, vroll, vpitch, vyaw);
+		}
+
+		if(info)
+		{
+			distanceTravelled_ += t.getNorm();
+			info->distanceTravelled = distanceTravelled_;
+		}
+
+		return _pose *= t; // update
 	}
 	else if(_resetCurrentCount > 0)
 	{
@@ -159,1571 +522,223 @@ Transform Odometry::process(const SensorData & data, OdometryInfo * info)
 		}
 	}
 
+	previousVelocityTransform_.setNull();
+	previousStamp_ = 0;
+
 	return Transform();
 }
 
-//OdometryBOW
-OdometryBOW::OdometryBOW(const ParametersMap & parameters) :
-	Odometry(parameters),
-	_localHistoryMaxSize(Parameters::defaultOdomBowLocalHistorySize()),
-	_memory(0)
-{
-	Parameters::parse(parameters, Parameters::kOdomBowLocalHistorySize(), _localHistoryMaxSize);
-
-	ParametersMap customParameters;
-	customParameters.insert(ParametersPair(Parameters::kKpWordsPerImage(), uNumber2Str(this->getMaxFeatures()))); // hack
-	customParameters.insert(ParametersPair(Parameters::kKpMaxDepth(), uNumber2Str(this->getMaxDepth())));
-	customParameters.insert(ParametersPair(Parameters::kKpRoiRatios(), this->getRoiRatios()));
-	customParameters.insert(ParametersPair(Parameters::kMemRehearsalSimilarity(), "1.0")); // desactivate rehearsal
-	customParameters.insert(ParametersPair(Parameters::kMemBinDataKept(), "false"));
-	customParameters.insert(ParametersPair(Parameters::kMemSTMSize(), "0"));
-	int nn = Parameters::defaultOdomBowNNType();
-	float nndr = Parameters::defaultOdomBowNNDR();
-	int featureType = Parameters::defaultOdomFeatureType();
-	Parameters::parse(parameters, Parameters::kOdomBowNNType(), nn);
-	Parameters::parse(parameters, Parameters::kOdomBowNNDR(), nndr);
-	Parameters::parse(parameters, Parameters::kOdomFeatureType(), featureType);
-	customParameters.insert(ParametersPair(Parameters::kKpNNStrategy(), uNumber2Str(nn)));
-	customParameters.insert(ParametersPair(Parameters::kKpNndrRatio(), uNumber2Str(nndr)));
-	customParameters.insert(ParametersPair(Parameters::kKpDetectorStrategy(), uNumber2Str(featureType)));
-
-	// Memory's stereo parameters, copy from Odometry
-	int subPixWinSize_ = Parameters::defaultOdomSubPixWinSize();
-	int subPixIterations_ = Parameters::defaultOdomSubPixIterations();
-	double subPixEps_ = Parameters::defaultOdomSubPixEps();
-	Parameters::parse(parameters, Parameters::kOdomSubPixWinSize(), subPixWinSize_);
-	Parameters::parse(parameters, Parameters::kOdomSubPixIterations(), subPixIterations_);
-	Parameters::parse(parameters, Parameters::kOdomSubPixEps(), subPixEps_);
-	customParameters.insert(ParametersPair(Parameters::kKpSubPixWinSize(), uNumber2Str(subPixWinSize_)));
-	customParameters.insert(ParametersPair(Parameters::kKpSubPixIterations(), uNumber2Str(subPixIterations_)));
-	customParameters.insert(ParametersPair(Parameters::kKpSubPixEps(), uNumber2Str(subPixEps_)));
-
-	// add only feature stuff
-	for(ParametersMap::const_iterator iter=parameters.begin(); iter!=parameters.end(); ++iter)
-	{
-		std::string group = uSplit(iter->first, '/').front();
-		if(group.compare("SURF") == 0 ||
-			group.compare("SIFT") == 0 ||
-			group.compare("BRIEF") == 0 ||
-			group.compare("FAST") == 0 ||
-			group.compare("ORB") == 0 ||
-			group.compare("FREAK") == 0 ||
-			group.compare("GFTT") == 0 ||
-			group.compare("BRISK") == 0)
-		{
-			customParameters.insert(*iter);
-		}
-	}
-
-	_memory = new Memory(customParameters);
-	if(!_memory->init("", false, ParametersMap()))
-	{
-		UERROR("Error initializing the memory for BOW Odometry.");
-	}
-}
-
-OdometryBOW::~OdometryBOW()
-{
-	delete _memory;
-	UDEBUG("");
-}
-
-
-void OdometryBOW::reset(const Transform & initialPose)
-{
-	Odometry::reset(initialPose);
-	_memory->init("", false, ParametersMap());
-	localMap_.clear();
-}
-
-// return not null transform if odometry is correctly computed
-Transform OdometryBOW::computeTransform(
-		const SensorData & data,
-		OdometryInfo * info)
-{
-	UTimer timer;
-	Transform output;
-
-	if(info)
-	{
-		info->type = 0;
-	}
-
-	double variance = 0;
-	int inliers = 0;
-	int correspondences = 0;
-	int nFeatures = 0;
-
-	const Signature * previousSignature = _memory->getLastWorkingSignature();
-	if(_memory->update(data))
-	{
-		const Signature * newSignature = _memory->getLastWorkingSignature();
-		if(newSignature)
-		{
-			nFeatures = (int)newSignature->getWords().size();
-			if(this->isInfoDataFilled() && info)
-			{
-				info->words = newSignature->getWords();
-			}
-		}
-
-		if(previousSignature && newSignature)
-		{
-			Transform transform;
-			if((int)localMap_.size() >= this->getMinInliers())
-			{
-				if(this->isPnPEstimationUsed())
-				{
-					if((int)newSignature->getWords().size() >= this->getMinInliers())
-					{
-						// find correspondences
-						std::vector<int> ids = uListToVector(uUniqueKeys(newSignature->getWords()));
-						std::vector<cv::Point3f> objectPoints(ids.size());
-						std::vector<cv::Point2f> imagePoints(ids.size());
-						int oi=0;
-						std::vector<int> matches(ids.size());
-						for(unsigned int i=0; i<ids.size(); ++i)
-						{
-							if(localMap_.count(ids[i]) == 1)
-							{
-								pcl::PointXYZ pt = localMap_.find(ids[i])->second;
-								objectPoints[oi].x = pt.x;
-								objectPoints[oi].y = pt.y;
-								objectPoints[oi].z = pt.z;
-								imagePoints[oi] = newSignature->getWords().find(ids[i])->second.pt;
-								matches[oi++] = ids[i];
-							}
-						}
-
-						objectPoints.resize(oi);
-						imagePoints.resize(oi);
-						matches.resize(oi);
-
-						if(this->isInfoDataFilled() && info)
-						{
-							info->wordMatches.insert(info->wordMatches.end(), matches.begin(), matches.end());
-						}
-						correspondences = (int)matches.size();
-
-						if((int)matches.size() >= this->getMinInliers())
-						{
-							//PnPRansac
-							cv::Mat K = (cv::Mat_<double>(3,3) <<
-								data.fx(), 0, data.cx(),
-								0, data.fx(), data.cy(),
-								0, 0, 1);
-							Transform guess = (this->getPose() * data.localTransform()).inverse();
-							cv::Mat R = (cv::Mat_<double>(3,3) <<
-									(double)guess.r11(), (double)guess.r12(), (double)guess.r13(),
-									(double)guess.r21(), (double)guess.r22(), (double)guess.r23(),
-									(double)guess.r31(), (double)guess.r32(), (double)guess.r33());
-							cv::Mat rvec(1,3, CV_64FC1);
-							cv::Rodrigues(R, rvec);
-							cv::Mat tvec = (cv::Mat_<double>(1,3) << (double)guess.x(), (double)guess.y(), (double)guess.z());
-							std::vector<int> inliersV;
-							cv::solvePnPRansac(objectPoints,
-									imagePoints,
-									K,
-									cv::Mat(),
-									rvec,
-									tvec,
-									true,
-									this->getIterations(),
-									this->getPnPReprojError(),
-									0,
-									inliersV,
-									this->getPnPFlags());
-
-							inliers = (int)inliersV.size();
-							if((int)inliersV.size() >= this->getMinInliers())
-							{
-								cv::Rodrigues(rvec, R);
-								Transform pnp(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2), tvec.at<double>(0),
-											   R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2), tvec.at<double>(1),
-											   R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2), tvec.at<double>(2));
-
-								// make it incremental
-								transform = (data.localTransform() * pnp * this->getPose()).inverse();
-
-								UDEBUG("Odom transform = %s", transform.prettyPrint().c_str());
-
-								// compute variance (like in PCL computeVariance() method of sac_model.h)
-								std::vector<float> errorSqrdDists(inliersV.size());
-								for(unsigned int i=0; i<inliersV.size(); ++i)
-								{
-									std::multimap<int, pcl::PointXYZ>::const_iterator iter = newSignature->getWords3().find(matches[inliersV[i]]);
-									UASSERT(iter != newSignature->getWords3().end());
-									const cv::Point3f & objPt = objectPoints[inliersV[i]];
-									pcl::PointXYZ newPt = util3d::transformPoint(iter->second, this->getPose()*transform);
-									errorSqrdDists[i] = uNormSquared(objPt.x-newPt.x, objPt.y-newPt.y, objPt.z-newPt.z);
-								}
-								std::sort(errorSqrdDists.begin(), errorSqrdDists.end());
-								double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> 1];
-								variance = 2.1981 * median_error_sqr;
-							}
-							else
-							{
-								UWARN("PnP not enough inliers (%d < %d), rejecting the transform...", (int)inliersV.size(), this->getMinInliers());
-							}
-
-							if(this->isInfoDataFilled() && info && inliersV.size())
-							{
-								info->wordInliers.resize(inliersV.size());
-								for(unsigned int i=0; i<inliersV.size(); ++i)
-								{
-									info->wordInliers[i] = matches[inliersV[i]];
-								}
-							}
-						}
-						else
-						{
-							UWARN("Not enough correspondences (%d < %d)", correspondences, this->getMinInliers());
-						}
-					}
-					else
-					{
-						UWARN("Not enough features in the new image (%d < %d)", (int)newSignature->getWords().size(), this->getMinInliers());
-					}
-				}
-				else
-				{
-					if((int)newSignature->getWords3().size() >= this->getMinInliers())
-					{
-						pcl::PointCloud<pcl::PointXYZ>::Ptr inliers1(new pcl::PointCloud<pcl::PointXYZ>); // previous
-						pcl::PointCloud<pcl::PointXYZ>::Ptr inliers2(new pcl::PointCloud<pcl::PointXYZ>); // new
-
-						// No need to set max depth here, it is already applied in extractKeypointsAndDescriptors() above.
-						// Also! the localMap_ have points not in camera frame anymore (in local map frame), so filtering
-						// by depth here is wrong!
-						std::set<int> uniqueCorrespondences;
-						util3d::findCorrespondences(
-								localMap_,
-								newSignature->getWords3(),
-								*inliers1,
-								*inliers2,
-								0,
-								&uniqueCorrespondences);
-
-						UDEBUG("localMap=%d, new=%d, unique correspondences=%d", (int)localMap_.size(), (int)newSignature->getWords3().size(), (int)uniqueCorrespondences.size());
-
-						if(this->isInfoDataFilled() && info)
-						{
-							info->wordMatches.insert(info->wordMatches.end(), uniqueCorrespondences.begin(), uniqueCorrespondences.end());
-						}
-
-						correspondences = (int)inliers1->size();
-						if((int)inliers1->size() >= this->getMinInliers())
-						{
-							// the transform returned is global odometry pose, not incremental one
-							std::vector<int> inliersV;
-							Transform t = util3d::transformFromXYZCorrespondences(
-									inliers2,
-									inliers1,
-									this->getInlierDistance(),
-									this->getIterations(),
-									this->getRefineIterations()>0, 3.0, this->getRefineIterations(),
-									&inliersV,
-									&variance);
-
-							inliers = (int)inliersV.size();
-							if(!t.isNull() && inliers >= this->getMinInliers())
-							{
-								// make it incremental
-								transform = this->getPose().inverse() * t;
-
-								UDEBUG("Odom transform = %s", transform.prettyPrint().c_str());
-							}
-							else
-							{
-								UWARN("Transform not valid (inliers = %d/%d)", inliers, correspondences);
-							}
-
-							if(this->isInfoDataFilled() && info && inliersV.size())
-							{
-								info->wordInliers.resize(inliersV.size());
-								for(unsigned int i=0; i<inliersV.size(); ++i)
-								{
-									info->wordInliers[i] = info->wordMatches[inliersV[i]];
-								}
-							}
-						}
-						else
-						{
-							UWARN("Not enough inliers %d < %d", (int)inliers1->size(), this->getMinInliers());
-						}
-					}
-					else
-					{
-						UWARN("Not enough 3D features in the new image (%d < %d)", (int)newSignature->getWords3().size(), this->getMinInliers());
-					}
-				}
-			}
-			else
-			{
-				UWARN("Local map too small!? (%d < %d)", (int)localMap_.size(), this->getMinInliers());
-			}
-
-			if(transform.isNull())
-			{
-				_memory->deleteLocation(newSignature->id());
-			}
-			else
-			{
-				output = transform;
-				// remove words if history max size is reached
-				while(localMap_.size() && (int)localMap_.size() > _localHistoryMaxSize && _memory->getStMem().size()>1)
-				{
-					int nodeId = *_memory->getStMem().begin();
-					std::list<int> removedPts;
-					_memory->deleteLocation(nodeId, &removedPts);
-					for(std::list<int>::iterator iter = removedPts.begin(); iter!=removedPts.end(); ++iter)
-					{
-						localMap_.erase(*iter);
-					}
-				}
-
-				if(_localHistoryMaxSize == 0 && localMap_.size() > 0 && localMap_.size() > newSignature->getWords3().size())
-				{
-					UERROR("Local map should have only words of the last added signature here! (size=%d, max history size=%d, newWords=%d)",
-							(int)localMap_.size(), _localHistoryMaxSize, (int)newSignature->getWords3().size());
-				}
-
-				// update local map
-				std::list<int> uniques = uUniqueKeys(newSignature->getWords3());
-				Transform t = this->getPose()*output;
-				for(std::list<int>::iterator iter = uniques.begin(); iter!=uniques.end(); ++iter)
-				{
-					// Only add unique words not in local map
-					if(newSignature->getWords3().count(*iter) == 1)
-					{
-						// keep old word
-						if(localMap_.find(*iter) == localMap_.end())
-						{
-							const pcl::PointXYZ & pt = newSignature->getWords3().find(*iter)->second;
-							if(pcl::isFinite(pt))
-							{
-								pcl::PointXYZ pt2 = util3d::transformPoint(pt, t);
-								localMap_.insert(std::make_pair(*iter, pt2));
-							}
-						}
-					}
-					else
-					{
-						localMap_.erase(*iter);
-					}
-				}
-			}
-		}
-		else if(!previousSignature && newSignature)
-		{
-			localMap_.clear();
-
-			int count = 0;
-			std::list<int> uniques = uUniqueKeys(newSignature->getWords3());
-			if((int)uniques.size() >= this->getMinInliers())
-			{
-				output.setIdentity();
-
-				Transform t = this->getPose(); // initial pose maybe not identity...
-				for(std::list<int>::iterator iter = uniques.begin(); iter!=uniques.end(); ++iter)
-				{
-					// Only add unique words
-					if(newSignature->getWords3().count(*iter) == 1)
-					{
-						const pcl::PointXYZ & pt = newSignature->getWords3().find(*iter)->second;
-						if(pcl::isFinite(pt))
-						{
-							pcl::PointXYZ pt2 = util3d::transformPoint(pt, t);
-							localMap_.insert(std::make_pair(*iter, pt2));
-						}
-						else
-						{
-							++count;
-						}
-					}
-				}
-			}
-			else
-			{
-				// not enough features, just delete it
-				_memory->deleteLocation(newSignature->id());
-			}
-			UDEBUG("uniques=%d, pt not finite = %d", (int)uniques.size(),count);
-		}
-
-		_memory->emptyTrash();
-	}
-
-	if(info)
-	{
-		info->variance = variance;
-		info->inliers = inliers;
-		info->matches = correspondences;
-		info->features = nFeatures;
-		info->localMapSize = (int)localMap_.size();
-	}
-
-	UINFO("Odom update time = %fs lost=%s features=%d inliers=%d/%d variance=%f local_map=%d dict=%d nodes=%d",
-			timer.elapsed(),
-			output.isNull()?"true":"false",
-			nFeatures,
-			inliers,
-			correspondences,
-			variance,
-			(int)localMap_.size(),
-			(int)_memory->getVWDictionary()->getVisualWords().size(),
-			(int)_memory->getStMem().size());
-	return output;
-}
-
-//OdometryOpticalFlow
-OdometryOpticalFlow::OdometryOpticalFlow(const ParametersMap & parameters) :
-	Odometry(parameters),
-	flowWinSize_(Parameters::defaultOdomFlowWinSize()),
-	flowIterations_(Parameters::defaultOdomFlowIterations()),
-	flowEps_(Parameters::defaultOdomFlowEps()),
-	flowMaxLevel_(Parameters::defaultOdomFlowMaxLevel()),
-	stereoWinSize_(Parameters::defaultStereoWinSize()),
-	stereoIterations_(Parameters::defaultStereoIterations()),
-	stereoEps_(Parameters::defaultStereoEps()),
-	stereoMaxLevel_(Parameters::defaultStereoMaxLevel()),
-	stereoMaxSlope_(Parameters::defaultStereoMaxSlope()),
-	subPixWinSize_(Parameters::defaultOdomSubPixWinSize()),
-	subPixIterations_(Parameters::defaultOdomSubPixIterations()),
-	subPixEps_(Parameters::defaultOdomSubPixEps()),
-	refCorners3D_(new pcl::PointCloud<pcl::PointXYZ>)
-{
-	Parameters::parse(parameters, Parameters::kOdomFlowWinSize(), flowWinSize_);
-	Parameters::parse(parameters, Parameters::kOdomFlowIterations(), flowIterations_);
-	Parameters::parse(parameters, Parameters::kOdomFlowEps(), flowEps_);
-	Parameters::parse(parameters, Parameters::kOdomFlowMaxLevel(), flowMaxLevel_);
-	Parameters::parse(parameters, Parameters::kStereoWinSize(), stereoWinSize_);
-	Parameters::parse(parameters, Parameters::kStereoIterations(), stereoIterations_);
-	Parameters::parse(parameters, Parameters::kStereoEps(), stereoEps_);
-	Parameters::parse(parameters, Parameters::kStereoMaxLevel(), stereoMaxLevel_);
-	Parameters::parse(parameters, Parameters::kStereoMaxSlope(), stereoMaxSlope_);
-	Parameters::parse(parameters, Parameters::kOdomSubPixWinSize(), subPixWinSize_);
-	Parameters::parse(parameters, Parameters::kOdomSubPixIterations(), subPixIterations_);
-	Parameters::parse(parameters, Parameters::kOdomSubPixEps(), subPixEps_);
-
-	ParametersMap::const_iterator iter;
-	Feature2D::Type detectorStrategy = (Feature2D::Type)Parameters::defaultOdomFeatureType();
-	if((iter=parameters.find(Parameters::kOdomFeatureType())) != parameters.end())
-	{
-		detectorStrategy = (Feature2D::Type)std::atoi((*iter).second.c_str());
-	}
-	feature2D_ = Feature2D::create(detectorStrategy, parameters);
-}
-
-OdometryOpticalFlow::~OdometryOpticalFlow()
-{
-	delete feature2D_;
-}
-
-
-void OdometryOpticalFlow::reset(const Transform & initialPose)
-{
-	Odometry::reset(initialPose);
-	refFrame_ = cv::Mat();
-	refCorners_.clear();
-	refCorners3D_->clear();
-}
-
-// return not null transform if odometry is correctly computed
-Transform OdometryOpticalFlow::computeTransform(
-		const SensorData & data,
-		OdometryInfo * info)
+void Odometry::initKalmanFilter(const Transform & initialPose, float vx, float vy, float vz, float vroll, float vpitch, float vyaw)
 {
 	UDEBUG("");
+	// See OpenCV tutorial: http://docs.opencv.org/master/dc/d2c/tutorial_real_time_pose.html
+	// See Kalman filter pose/orientation estimation theory: http://campar.in.tum.de/Chair/KalmanFilter
 
-	if(info)
+	// initialize the Kalman filter
+	int nStates = 18;            // the number of states (x,y,z,x',y',z',x'',y'',z'',roll,pitch,yaw,roll',pitch',yaw',roll'',pitch'',yaw'')
+	int nMeasurements = 6;       // the number of measured states (x',y',z',roll',pitch',yaw')
+	if(_force3DoF)
 	{
-		info->type = 1;
+		nStates = 9;             // the number of states (x,y,x',y',x'',y'',yaw,yaw',yaw'')
+		nMeasurements = 3;       // the number of measured states (x',y',yaw')
 	}
+	int nInputs = 0;             // the number of action control
 
-	if(!data.rightImage().empty())
+	/* From viso2, measurement covariance
+	 * static const boost::array<double, 36> STANDARD_POSE_COVARIANCE =
+	{ { 0.1, 0, 0, 0, 0, 0,
+	    0, 0.1, 0, 0, 0, 0,
+	    0, 0, 0.1, 0, 0, 0,
+	    0, 0, 0, 0.17, 0, 0,
+	    0, 0, 0, 0, 0.17, 0,
+	    0, 0, 0, 0, 0, 0.17 } };
+	static const boost::array<double, 36> STANDARD_TWIST_COVARIANCE =
+	{ { 0.05, 0, 0, 0, 0, 0,
+	    0, 0.05, 0, 0, 0, 0,
+	    0, 0, 0.05, 0, 0, 0,
+	    0, 0, 0, 0.09, 0, 0,
+	    0, 0, 0, 0, 0.09, 0,
+	    0, 0, 0, 0, 0, 0.09 } };
+	 */
+
+
+	kalmanFilter_.init(nStates, nMeasurements, nInputs);                 // init Kalman Filter
+	cv::setIdentity(kalmanFilter_.processNoiseCov, cv::Scalar::all(_kalmanProcessNoise));  // set process noise
+	cv::setIdentity(kalmanFilter_.measurementNoiseCov, cv::Scalar::all(_kalmanMeasurementNoise));   // set measurement noise
+	cv::setIdentity(kalmanFilter_.errorCovPost, cv::Scalar::all(1));             // error covariance
+
+	float x,y,z,roll,pitch,yaw;
+	initialPose.getTranslationAndEulerAngles(x,y,z,roll,pitch,yaw);
+
+	if(_force3DoF)
 	{
-		//stereo
-		return computeTransformStereo(data, info);
-	}
-	else
-	{
-		//rgbd
-		return computeTransformRGBD(data, info);
-	}
-}
+        /* MEASUREMENT MODEL (velocity) */
+		//  [0 0 1 0 0 0 0 0 0]
+		//  [0 0 0 1 0 0 0 0 0]
+		//  [0 0 0 0 0 0 0 1 0]
+		kalmanFilter_.measurementMatrix.at<float>(0,2) = 1;  // x'
+		kalmanFilter_.measurementMatrix.at<float>(1,3) = 1;  // y'
+		kalmanFilter_.measurementMatrix.at<float>(2,7) = 1; // yaw'
 
-Transform OdometryOpticalFlow::computeTransformStereo(
-		const SensorData & data,
-		OdometryInfo * info)
-{
-	UTimer timer;
-	Transform output;
+		kalmanFilter_.statePost.at<float>(0) = x;
+		kalmanFilter_.statePost.at<float>(1) = y;
+		kalmanFilter_.statePost.at<float>(6) = yaw;
 
-	double variance = 0;
-	int inliers = 0;
-	int correspondences = 0;
-
-	cv::Mat newLeftFrame;
-	// convert to grayscale
-	if(data.image().channels() > 1)
-	{
-		cv::cvtColor(data.image(), newLeftFrame, cv::COLOR_BGR2GRAY);
-	}
-	else
-	{
-		newLeftFrame = data.image().clone();
-	}
-	cv::Mat newRightFrame = data.rightImage().clone();
-
-	std::vector<cv::Point2f> newCorners;
-	UDEBUG("lastCorners_.size()=%d lastFrame_=%d lastRightFrame_=%d", (int)refCorners_.size(), refFrame_.empty()?0:1, refRightFrame_.empty()?0:1);
-	if(!refFrame_.empty() && !refRightFrame_.empty() && refCorners_.size())
-	{
-		UDEBUG("");
-		// Find features in the new left image
-		std::vector<unsigned char> status;
-		std::vector<float> err;
-		UDEBUG("cv::calcOpticalFlowPyrLK() begin");
-		cv::calcOpticalFlowPyrLK(
-				refFrame_,
-				newLeftFrame,
-				refCorners_,
-				newCorners,
-				status,
-				err,
-				cv::Size(flowWinSize_, flowWinSize_), flowMaxLevel_,
-				cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, flowIterations_, flowEps_),
-				cv::OPTFLOW_LK_GET_MIN_EIGENVALS, 1e-4);
-		UDEBUG("cv::calcOpticalFlowPyrLK() end");
-
-		std::vector<cv::Point2f> lastCornersKept(status.size());
-		std::vector<cv::Point2f> newCornersKept(status.size());
-		int ki = 0;
-		for(unsigned int i=0; i<status.size(); ++i)
-		{
-			if(status[i])
-			{
-				lastCornersKept[ki] = refCorners_[i];
-				newCornersKept[ki] = newCorners[i];
-				++ki;
-			}
-		}
-		lastCornersKept.resize(ki);
-		newCornersKept.resize(ki);
-
-		if(ki && ki >= this->getMinInliers())
-		{
-			std::vector<unsigned char> statusLast;
-			std::vector<float> errLast;
-			std::vector<cv::Point2f> lastCornersKeptRight;
-			UDEBUG("previous stereo disparity");
-			cv::calcOpticalFlowPyrLK(
-						refFrame_,
-						refRightFrame_,
-						lastCornersKept,
-						lastCornersKeptRight,
-						statusLast,
-						errLast,
-						cv::Size(stereoWinSize_, stereoWinSize_), stereoMaxLevel_,
-						cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, stereoIterations_, stereoEps_),
-						cv::OPTFLOW_LK_GET_MIN_EIGENVALS, 1e-4);
-
-			UDEBUG("new stereo disparity");
-			std::vector<unsigned char> statusNew;
-			std::vector<float> errNew;
-			std::vector<cv::Point2f> newCornersKeptRight;
-			cv::calcOpticalFlowPyrLK(
-						newLeftFrame,
-						newRightFrame,
-						newCornersKept,
-						newCornersKeptRight,
-						statusNew,
-						errNew,
-						cv::Size(stereoWinSize_, stereoWinSize_), stereoMaxLevel_,
-						cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, stereoIterations_, stereoEps_),
-						cv::OPTFLOW_LK_GET_MIN_EIGENVALS, 1e-4);
-
-			if(this->isPnPEstimationUsed())
-			{
-				// find correspondences
-				if(this->isInfoDataFilled() && info)
-				{
-					info->refCorners.resize(statusLast.size());
-					info->newCorners.resize(statusLast.size());
-				}
-
-				int flowInliers = 0;
-				std::vector<cv::Point3f> objectPoints(statusLast.size());
-				std::vector<cv::Point2f> imagePoints(statusLast.size());
-				std::vector<pcl::PointXYZ> image3DPoints(statusLast.size());
-				int oi=0;
-				float bad_point = std::numeric_limits<float>::quiet_NaN ();
-				for(unsigned int i=0; i<statusLast.size(); ++i)
-				{
-					if(statusLast[i])
-					{
-						float lastDisparity = lastCornersKept[i].x - lastCornersKeptRight[i].x;
-						float lastSlope = fabs((lastCornersKept[i].y-lastCornersKeptRight[i].y) / (lastCornersKept[i].x-lastCornersKeptRight[i].x));
-						float newDisparity = newCornersKept[i].x - newCornersKeptRight[i].x;
-						float newSlope = fabs((newCornersKept[i].y-newCornersKeptRight[i].y) / (newCornersKept[i].x-newCornersKeptRight[i].x));
-						if(lastDisparity > 0.0f && lastSlope < stereoMaxSlope_)
-						{
-							pcl::PointXYZ lastPt3D = util3d::projectDisparityTo3D(
-									lastCornersKept[i],
-									lastDisparity,
-									data.cx(), data.cy(), data.fx(), data.baseline());
-
-							if(pcl::isFinite(lastPt3D) &&
-							   (this->getMaxDepth() == 0.0f || uIsInBounds(lastPt3D.z, 0.0f, this->getMaxDepth())))
-							{
-								//Add 3D correspondences!
-								lastPt3D = util3d::transformPoint(lastPt3D, data.localTransform());
-								objectPoints[oi].x = lastPt3D.x;
-								objectPoints[oi].y = lastPt3D.y;
-								objectPoints[oi].z = lastPt3D.z;
-								imagePoints[oi] = newCornersKept.at(i);
-
-								// new 3D points, used to compute variance
-								image3DPoints[oi] = pcl::PointXYZ(bad_point, bad_point, bad_point);
-								if(newDisparity > 0.0f && newSlope < stereoMaxSlope_)
-								{
-									pcl::PointXYZ newPt3D = util3d::projectDisparityTo3D(
-											newCornersKept[i],
-											newDisparity,
-											data.cx(), data.cy(), data.fx(), data.baseline());
-									if(pcl::isFinite(newPt3D) &&
-									   (this->getMaxDepth() == 0.0f || uIsInBounds(newPt3D.z, 0.0f, this->getMaxDepth())))
-									{
-										image3DPoints[oi] = util3d::transformPoint(newPt3D, data.localTransform());
-									}
-								}
-
-								if(this->isInfoDataFilled() && info)
-								{
-									info->refCorners[oi].pt = lastCornersKept[i];
-									info->newCorners[oi].pt = newCornersKept[i];
-								}
-								++oi;
-							}
-						}
-						++flowInliers;
-					}
-				}
-				objectPoints.resize(oi);
-				imagePoints.resize(oi);
-				image3DPoints.resize(oi);
-				UDEBUG("Flow inliers = %d, added inliers=%d", flowInliers, oi);
-
-				if(this->isInfoDataFilled() && info)
-				{
-					info->refCorners.resize(oi);
-					info->newCorners.resize(oi);
-				}
-
-				correspondences = oi;
-
-				if(correspondences >= this->getMinInliers())
-				{
-					//PnPRansac
-					cv::Mat K = (cv::Mat_<double>(3,3) <<
-						data.fx(), 0, data.cx(),
-						0, data.fx(), data.cy(),
-						0, 0, 1);
-					Transform guess = (data.localTransform()).inverse();
-					cv::Mat R = (cv::Mat_<double>(3,3) <<
-							(double)guess.r11(), (double)guess.r12(), (double)guess.r13(),
-							(double)guess.r21(), (double)guess.r22(), (double)guess.r23(),
-							(double)guess.r31(), (double)guess.r32(), (double)guess.r33());
-					cv::Mat rvec(1,3, CV_64FC1);
-					cv::Rodrigues(R, rvec);
-					cv::Mat tvec = (cv::Mat_<double>(1,3) << (double)guess.x(), (double)guess.y(), (double)guess.z());
-					std::vector<int> inliersV;
-					cv::solvePnPRansac(objectPoints,
-							imagePoints,
-							K,
-							cv::Mat(),
-							rvec,
-							tvec,
-							true,
-							this->getIterations(),
-							this->getPnPReprojError(),
-							0,
-							inliersV,
-							this->getPnPFlags());
-
-					inliers = (int)inliersV.size();
-					if((int)inliersV.size() >= this->getMinInliers())
-					{
-						cv::Rodrigues(rvec, R);
-						Transform pnp(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2), tvec.at<double>(0),
-									   R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2), tvec.at<double>(1),
-									   R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2), tvec.at<double>(2));
-
-						// make it incremental
-						output = (data.localTransform() * pnp).inverse();
-
-						UDEBUG("Odom transform = %s", output.prettyPrint().c_str());
-
-						// compute variance (like in PCL computeVariance() method of sac_model.h)
-						std::vector<float> errorSqrdDists(inliersV.size());
-						int ii=0;
-						for(unsigned int i=0; i<inliersV.size(); ++i)
-						{
-							pcl::PointXYZ & newPt = image3DPoints[inliersV[i]];
-							if(pcl::isFinite(newPt))
-							{
-								newPt = util3d::transformPoint(newPt, output);
-								const cv::Point3f & objPt = objectPoints[inliersV[i]];
-								errorSqrdDists[ii++] = uNormSquared(objPt.x-newPt.x, objPt.y-newPt.y, objPt.z-newPt.z);
-							}
-						}
-						errorSqrdDists.resize(ii);
-						if(errorSqrdDists.size())
-						{
-							std::sort(errorSqrdDists.begin(), errorSqrdDists.end());
-							double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> 1];
-							variance = 2.1981 * median_error_sqr;
-						}
-					}
-					else
-					{
-						UWARN("PnP not enough inliers (%d < %d), rejecting the transform...", (int)inliersV.size(), this->getMinInliers());
-					}
-
-					if(this->isInfoDataFilled() && info)
-					{
-						info->cornerInliers = inliersV;
-					}
-				}
-				else
-				{
-					UWARN("Not enough correspondences (%d < %d)", correspondences, this->getMinInliers());
-				}
-			}
-			else
-			{
-				UDEBUG("Getting correspondences begin");
-				// Get 3D correspondences
-				pcl::PointCloud<pcl::PointXYZ>::Ptr correspondencesLast(new pcl::PointCloud<pcl::PointXYZ>);
-				pcl::PointCloud<pcl::PointXYZ>::Ptr correspondencesNew(new pcl::PointCloud<pcl::PointXYZ>);
-				correspondencesLast->resize(statusLast.size());
-				correspondencesNew->resize(statusLast.size());
-				int oi = 0;
-				if(this->isInfoDataFilled() && info)
-				{
-					info->refCorners.resize(statusLast.size());
-					info->newCorners.resize(statusLast.size());
-				}
-				for(unsigned int i=0; i<statusLast.size(); ++i)
-				{
-					if(statusLast[i] && statusNew[i])
-					{
-						float lastDisparity = lastCornersKept[i].x - lastCornersKeptRight[i].x;
-						float newDisparity = newCornersKept[i].x - newCornersKeptRight[i].x;
-						float lastSlope = fabs((lastCornersKept[i].y-lastCornersKeptRight[i].y) / (lastCornersKept[i].x-lastCornersKeptRight[i].x));
-						float newSlope = fabs((newCornersKept[i].y-newCornersKeptRight[i].y) / (newCornersKept[i].x-newCornersKeptRight[i].x));
-						if(lastDisparity > 0.0f && newDisparity > 0.0f &&
-							lastSlope < stereoMaxSlope_ && newSlope < stereoMaxSlope_)
-						{
-							pcl::PointXYZ lastPt3D = util3d::projectDisparityTo3D(
-									lastCornersKept[i],
-									lastDisparity,
-									data.cx(), data.cy(), data.fx(), data.baseline());
-							pcl::PointXYZ newPt3D = util3d::projectDisparityTo3D(
-									newCornersKept[i],
-									newDisparity,
-									data.cx(), data.cy(), data.fx(), data.baseline());
-
-							if(pcl::isFinite(lastPt3D) && (this->getMaxDepth() == 0.0f || uIsInBounds(lastPt3D.z, 0.0f, this->getMaxDepth())) &&
-							   pcl::isFinite(newPt3D) && (this->getMaxDepth() == 0.0f || uIsInBounds(newPt3D.z, 0.0f, this->getMaxDepth())))
-							{
-								//Add 3D correspondences!
-								lastPt3D = util3d::transformPoint(lastPt3D, data.localTransform());
-								newPt3D = util3d::transformPoint(newPt3D, data.localTransform());
-								correspondencesLast->at(oi) = lastPt3D;
-								correspondencesNew->at(oi) = newPt3D;
-								if(this->isInfoDataFilled() && info)
-								{
-									info->refCorners[oi].pt = lastCornersKept[i];
-									info->newCorners[oi].pt = newCornersKept[i];
-								}
-								++oi;
-							}
-						}
-					}
-				}// end loop
-				correspondencesLast->resize(oi);
-				correspondencesNew->resize(oi);
-				if(this->isInfoDataFilled() && info)
-				{
-					info->refCorners.resize(oi);
-					info->newCorners.resize(oi);
-				}
-				correspondences = oi;
-				refCorners3D_ = correspondencesNew;
-				UDEBUG("Getting correspondences end, kept %d/%d", correspondences, (int)statusLast.size());
-
-				if(correspondences >= this->getMinInliers())
-				{
-					std::vector<int> inliersV;
-					UTimer timerRANSAC;
-					Transform t = util3d::transformFromXYZCorrespondences(
-							correspondencesNew,
-							correspondencesLast,
-							this->getInlierDistance(),
-							this->getIterations(),
-							this->getRefineIterations()>0, 3.0, this->getRefineIterations(),
-							&inliersV,
-							&variance);
-					UDEBUG("time RANSAC = %fs", timerRANSAC.ticks());
-
-					inliers = (int)inliersV.size();
-					if(!t.isNull() && inliers >= this->getMinInliers())
-					{
-						output = t;
-					}
-					else
-					{
-						UWARN("Transform not valid (inliers = %d/%d)", inliers, correspondences);
-					}
-
-					if(this->isInfoDataFilled() && info)
-					{
-						info->cornerInliers = inliersV;
-					}
-				}
-				else
-				{
-					UWARN("Not enough correspondences (%d)", correspondences);
-				}
-			}
-		}
+		kalmanFilter_.statePost.at<float>(2) = vx;
+		kalmanFilter_.statePost.at<float>(3) = vy;
+		kalmanFilter_.statePost.at<float>(7) = vyaw;
 	}
 	else
 	{
-		//return Identity
-		output = Transform::getIdentity();
+	    /* MEASUREMENT MODEL (velocity) */
+		//  [0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+		//  [0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
+		//  [0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0]
+		//  [0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0]
+		//  [0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0]
+		//  [0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0]
+		kalmanFilter_.measurementMatrix.at<float>(0,3) = 1;  // x'
+		kalmanFilter_.measurementMatrix.at<float>(1,4) = 1;  // y'
+		kalmanFilter_.measurementMatrix.at<float>(2,5) = 1;  // z'
+		kalmanFilter_.measurementMatrix.at<float>(3,12) = 1; // roll'
+		kalmanFilter_.measurementMatrix.at<float>(4,13) = 1; // pitch'
+		kalmanFilter_.measurementMatrix.at<float>(5,14) = 1; // yaw'
+
+		kalmanFilter_.statePost.at<float>(0) = x;
+		kalmanFilter_.statePost.at<float>(1) = y;
+		kalmanFilter_.statePost.at<float>(2) = z;
+		kalmanFilter_.statePost.at<float>(9) = roll;
+		kalmanFilter_.statePost.at<float>(10) = pitch;
+		kalmanFilter_.statePost.at<float>(11) = yaw;
+
+		kalmanFilter_.statePost.at<float>(3) = vx;
+		kalmanFilter_.statePost.at<float>(4) = vy;
+		kalmanFilter_.statePost.at<float>(5) = vz;
+		kalmanFilter_.statePost.at<float>(12) = vroll;
+		kalmanFilter_.statePost.at<float>(13) = vpitch;
+		kalmanFilter_.statePost.at<float>(14) = vyaw;
 	}
-
-	newCorners.clear();
-	if(!output.isNull())
-	{
-		// Copy or generate new keypoints
-		if(data.keypoints().size())
-		{
-			newCorners.resize(data.keypoints().size());
-			for(unsigned int i=0; i<data.keypoints().size(); ++i)
-			{
-				newCorners[i] = data.keypoints().at(i).pt;
-			}
-		}
-		else
-		{
-			// generate kpts
-			std::vector<cv::KeyPoint> newKtps;
-			cv::Rect roi = Feature2D::computeRoi(newLeftFrame, this->getRoiRatios());
-			newKtps = feature2D_->generateKeypoints(newLeftFrame, this->getMaxFeatures(), roi);
-			Feature2D::limitKeypoints(newKtps, this->getMaxFeatures());
-
-			if(newKtps.size())
-			{
-				cv::KeyPoint::convert(newKtps, newCorners);
-
-				if(subPixWinSize_ > 0 && subPixIterations_ > 0)
-				{
-					UDEBUG("cv::cornerSubPix() begin");
-					cv::cornerSubPix(newLeftFrame, newCorners,
-						cv::Size( subPixWinSize_, subPixWinSize_ ),
-						cv::Size( -1, -1 ),
-						cv::TermCriteria( CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, subPixIterations_, subPixEps_ ) );
-					UDEBUG("cv::cornerSubPix() end");
-				}
-			}
-		}
-
-		if((int)newCorners.size() > this->getMinInliers())
-		{
-			refFrame_ = newLeftFrame;
-			refRightFrame_ = newRightFrame;
-			refCorners_ = newCorners;
-		}
-		else
-		{
-			UWARN("Too low 2D corners (%d), ignoring new frame...",
-					(int)newCorners.size());
-			output.setNull();
-		}
-	}
-
-	if(info)
-	{
-		info->variance = variance;
-		info->inliers = inliers;
-		info->features = (int)newCorners.size();
-		info->matches = correspondences;
-	}
-
-	UINFO("Odom update time = %fs lost=%s inliers=%d/%d, new corners=%d, transform accepted=%s",
-			timer.elapsed(),
-			output.isNull()?"true":"false",
-			inliers,
-			correspondences,
-			(int)newCorners.size(),
-			!output.isNull()?"true":"false");
-
-	return output;
 }
 
-Transform OdometryOpticalFlow::computeTransformRGBD(
-		const SensorData & data,
-		OdometryInfo * info)
+void Odometry::predictKalmanFilter(float dt, float * vx, float * vy, float * vz, float * vroll, float * vpitch, float * vyaw)
 {
-	UTimer timer;
-	Transform output;
-
-	double variance = 0;
-	int inliers = 0;
-	int correspondences = 0;
-
-	cv::Mat newFrame;
-	// convert to grayscale
-	if(data.image().channels() > 1)
+	// Set transition matrix with current dt
+	if(_force3DoF)
 	{
-		cv::cvtColor(data.image(), newFrame, cv::COLOR_BGR2GRAY);
+		// 2D:
+		//  [1 0 dt  0 dt2    0   0    0     0] x
+		//  [0 1  0 dt   0  dt2   0    0     0] y
+		//  [0 0  1  0   dt   0   0    0     0] x'
+		//  [0 0  0  1   0   dt   0    0     0] y'
+		//  [0 0  0  0   1    0   0    0     0] x''
+		//  [0 0  0  0   0    0   0    0     0] y''
+		//  [0 0  0  0   0    0   1   dt   dt2] yaw
+		//  [0 0  0  0   0    0   0    1    dt] yaw'
+		//  [0 0  0  0   0    0   0    0     1] yaw''
+		kalmanFilter_.transitionMatrix.at<float>(0,2) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(1,3) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(2,4) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(3,5) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(0,4) = 0.5*pow(dt,2);
+		kalmanFilter_.transitionMatrix.at<float>(1,5) = 0.5*pow(dt,2);
+		// orientation
+		kalmanFilter_.transitionMatrix.at<float>(6,7) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(7,8) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(6,8) = 0.5*pow(dt,2);
 	}
 	else
 	{
-		newFrame = data.image().clone();
+		//  [1 0 0 dt  0  0 dt2   0   0 0 0 0  0  0  0   0   0   0] x
+		//  [0 1 0  0 dt  0   0 dt2   0 0 0 0  0  0  0   0   0   0] y
+		//  [0 0 1  0  0 dt   0   0 dt2 0 0 0  0  0  0   0   0   0] z
+		//  [0 0 0  1  0  0  dt   0   0 0 0 0  0  0  0   0   0   0] x'
+		//  [0 0 0  0  1  0   0  dt   0 0 0 0  0  0  0   0   0   0] y'
+		//  [0 0 0  0  0  1   0   0  dt 0 0 0  0  0  0   0   0   0] z'
+		//  [0 0 0  0  0  0   1   0   0 0 0 0  0  0  0   0   0   0] x''
+		//  [0 0 0  0  0  0   0   1   0 0 0 0  0  0  0   0   0   0] y''
+		//  [0 0 0  0  0  0   0   0   1 0 0 0  0  0  0   0   0   0] z''
+		//  [0 0 0  0  0  0   0   0   0 1 0 0 dt  0  0 dt2   0   0]
+		//  [0 0 0  0  0  0   0   0   0 0 1 0  0 dt  0   0 dt2   0]
+		//  [0 0 0  0  0  0   0   0   0 0 0 1  0  0 dt   0   0 dt2]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  1  0  0  dt   0   0]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  0  1  0   0  dt   0]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  0  0  1   0   0  dt]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  0  0  0   1   0   0]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  0  0  0   0   1   0]
+		//  [0 0 0  0  0  0   0   0   0 0 0 0  0  0  0   0   0   1]
+		// position
+		kalmanFilter_.transitionMatrix.at<float>(0,3) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(1,4) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(2,5) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(3,6) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(4,7) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(5,8) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(0,6) = 0.5*pow(dt,2);
+		kalmanFilter_.transitionMatrix.at<float>(1,7) = 0.5*pow(dt,2);
+		kalmanFilter_.transitionMatrix.at<float>(2,8) = 0.5*pow(dt,2);
+		// orientation
+		kalmanFilter_.transitionMatrix.at<float>(9,12) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(10,13) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(11,14) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(12,15) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(13,16) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(14,17) = dt;
+		kalmanFilter_.transitionMatrix.at<float>(9,15) = 0.5*pow(dt,2);
+		kalmanFilter_.transitionMatrix.at<float>(10,16) = 0.5*pow(dt,2);
+		kalmanFilter_.transitionMatrix.at<float>(11,17) = 0.5*pow(dt,2);
 	}
 
-	std::vector<cv::Point2f> newCorners;
-	if(!refFrame_.empty() &&
-		(int)refCorners_.size() >= this->getMinInliers() &&
-		(int)refCorners3D_->size() >= this->getMinInliers())
+	// First predict, to update the internal statePre variable
+	UDEBUG("Predict");
+	const cv::Mat & prediction = kalmanFilter_.predict();
+
+	if(vx)
+		*vx = prediction.at<float>(3);                      // x'
+	if(vy)
+		*vy = prediction.at<float>(4);                      // y'
+	if(vz)
+		*vz = _force3DoF?0.0f:prediction.at<float>(5);      // z'
+	if(vroll)
+		*vroll = _force3DoF?0.0f:prediction.at<float>(12);  // roll'
+	if(vpitch)
+		*vpitch = _force3DoF?0.0f:prediction.at<float>(13); // pitch'
+	if(vyaw)
+		*vyaw = prediction.at<float>(_force3DoF?7:14);      // yaw'
+}
+
+void Odometry::updateKalmanFilter(float & vx, float & vy, float & vz, float & vroll, float & vpitch, float & vyaw)
+{
+	// Set measurement to predict
+	cv::Mat measurements;
+	if(!_force3DoF)
 	{
-		std::vector<unsigned char> status;
-		std::vector<float> err;
-		UDEBUG("cv::calcOpticalFlowPyrLK() begin");
-		cv::calcOpticalFlowPyrLK(
-				refFrame_,
-				newFrame,
-				refCorners_,
-				newCorners,
-				status,
-				err,
-				cv::Size(flowWinSize_, flowWinSize_), flowMaxLevel_,
-				cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, flowIterations_, flowEps_),
-				cv::OPTFLOW_LK_GET_MIN_EIGENVALS, 1e-4);
-		UDEBUG("cv::calcOpticalFlowPyrLK() end");
-
-		if(this->isPnPEstimationUsed())
-		{
-			// find correspondences
-			if(this->isInfoDataFilled() && info)
-			{
-				info->refCorners.resize(refCorners_.size());
-				info->newCorners.resize(refCorners_.size());
-			}
-
-			UASSERT(refCorners_.size() == refCorners3D_->size());
-			UDEBUG("lastCorners3D_ = %d", refCorners3D_->size());
-			int flowInliers = 0;
-			std::vector<cv::Point3f> objectPoints(refCorners_.size());
-			std::vector<cv::Point2f> imagePoints(refCorners_.size());
-			std::vector<pcl::PointXYZ> image3DPoints(refCorners_.size());
-			int oi=0;
-			float bad_point = std::numeric_limits<float>::quiet_NaN ();
-			for(unsigned int i=0; i<status.size(); ++i)
-			{
-				if(status[i])
-				{
-					if(pcl::isFinite(refCorners3D_->at(i)))
-					{
-						objectPoints[oi].x = refCorners3D_->at(i).x;
-						objectPoints[oi].y = refCorners3D_->at(i).y;
-						objectPoints[oi].z = refCorners3D_->at(i).z;
-						imagePoints[oi] = newCorners.at(i);
-
-						// new 3D points, used to compute variance
-						image3DPoints[oi] = pcl::PointXYZ(bad_point, bad_point, bad_point);
-						if(uIsInBounds(newCorners[i].x, 0.0f, float(data.depth().cols)) &&
-						   uIsInBounds(newCorners[i].y, 0.0f, float(data.depth().rows)))
-						{
-							pcl::PointXYZ pt = util3d::projectDepthTo3D(data.depth(), newCorners[i].x, newCorners[i].y,
-									data.cx(), data.cy(), data.fx(), data.fy(), true);
-							if(pcl::isFinite(pt) &&
-								(this->getMaxDepth() == 0.0f || (
-								uIsInBounds(pt.x, -this->getMaxDepth(), this->getMaxDepth()) &&
-								uIsInBounds(pt.y, -this->getMaxDepth(), this->getMaxDepth()) &&
-								uIsInBounds(pt.z, 0.0f, this->getMaxDepth()))))
-							{
-								image3DPoints[oi] = util3d::transformPoint(pt, data.localTransform());
-							}
-						}
-
-						if(this->isInfoDataFilled() && info)
-						{
-							info->refCorners[oi].pt = refCorners_[i];
-							info->newCorners[oi].pt = newCorners[i];
-						}
-
-						++oi;
-					}
-					++flowInliers;
-				}
-			}
-			objectPoints.resize(oi);
-			imagePoints.resize(oi);
-			image3DPoints.resize(oi);
-			UDEBUG("Flow inliers = %d, added inliers=%d", flowInliers, oi);
-
-			if(this->isInfoDataFilled() && info)
-			{
-				info->refCorners.resize(oi);
-				info->newCorners.resize(oi);
-			}
-
-			correspondences = oi;
-
-			if(correspondences >= this->getMinInliers())
-			{
-				//PnPRansac
-				cv::Mat K = (cv::Mat_<double>(3,3) <<
-					data.fx(), 0, data.cx(),
-					0, data.fyOrBaseline(), data.cy(),
-					0, 0, 1);
-				Transform guess = (data.localTransform()).inverse();
-				cv::Mat R = (cv::Mat_<double>(3,3) <<
-						(double)guess.r11(), (double)guess.r12(), (double)guess.r13(),
-						(double)guess.r21(), (double)guess.r22(), (double)guess.r23(),
-						(double)guess.r31(), (double)guess.r32(), (double)guess.r33());
-				cv::Mat rvec(1,3, CV_64FC1);
-				cv::Rodrigues(R, rvec);
-				cv::Mat tvec = (cv::Mat_<double>(1,3) << (double)guess.x(), (double)guess.y(), (double)guess.z());
-				std::vector<int> inliersV;
-				cv::solvePnPRansac(objectPoints,
-						imagePoints,
-						K,
-						cv::Mat(),
-						rvec,
-						tvec,
-						true,
-						this->getIterations(),
-						this->getPnPReprojError(),
-						0,
-						inliersV,
-						this->getPnPFlags());
-
-				inliers = (int)inliersV.size();
-				if((int)inliersV.size() >= this->getMinInliers())
-				{
-					cv::Rodrigues(rvec, R);
-					Transform pnp(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2), tvec.at<double>(0),
-								   R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2), tvec.at<double>(1),
-								   R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2), tvec.at<double>(2));
-
-					// make it incremental
-					output = (data.localTransform() * pnp).inverse();
-
-					UDEBUG("Odom transform = %s", output.prettyPrint().c_str());
-
-					// compute variance (like in PCL computeVariance() method of sac_model.h)
-					std::vector<float> errorSqrdDists(inliersV.size());
-					int ii=0;
-					for(unsigned int i=0; i<inliersV.size(); ++i)
-					{
-						pcl::PointXYZ & newPt = image3DPoints[inliersV[i]];
-						if(pcl::isFinite(newPt))
-						{
-							newPt = util3d::transformPoint(newPt, output);
-							const cv::Point3f & objPt = objectPoints[inliersV[i]];
-							errorSqrdDists[ii++] = uNormSquared(objPt.x-newPt.x, objPt.y-newPt.y, objPt.z-newPt.z);
-						}
-					}
-					errorSqrdDists.resize(ii);
-					if(errorSqrdDists.size())
-					{
-						std::sort(errorSqrdDists.begin(), errorSqrdDists.end());
-						double median_error_sqr = (double)errorSqrdDists[errorSqrdDists.size () >> 1];
-						variance = 2.1981 * median_error_sqr;
-					}
-				}
-				else
-				{
-					UWARN("PnP not enough inliers (%d < %d), rejecting the transform...", (int)inliersV.size(), this->getMinInliers());
-				}
-
-				if(this->isInfoDataFilled() && info)
-				{
-					info->cornerInliers = inliersV;
-				}
-			}
-			else
-			{
-				UWARN("Not enough correspondences (%d < %d)", correspondences, this->getMinInliers());
-			}
-		}
-		else
-		{
-			pcl::PointCloud<pcl::PointXYZ>::Ptr correspondencesLast(new pcl::PointCloud<pcl::PointXYZ>);
-			pcl::PointCloud<pcl::PointXYZ>::Ptr correspondencesNew(new pcl::PointCloud<pcl::PointXYZ>);
-			correspondencesLast->resize(refCorners_.size());
-			correspondencesNew->resize(refCorners_.size());
-			int oi=0;
-
-			if(this->isInfoDataFilled() && info)
-			{
-				info->refCorners.resize(refCorners_.size());
-				info->newCorners.resize(refCorners_.size());
-			}
-
-			UASSERT(refCorners_.size() == refCorners3D_->size());
-			UDEBUG("lastCorners3D_ = %d", refCorners3D_->size());
-			int flowInliers = 0;
-			for(unsigned int i=0; i<status.size(); ++i)
-			{
-				if(status[i] && pcl::isFinite(refCorners3D_->at(i)) &&
-					uIsInBounds(newCorners[i].x, 0.0f, float(data.depth().cols)) &&
-					uIsInBounds(newCorners[i].y, 0.0f, float(data.depth().rows)))
-				{
-					pcl::PointXYZ pt = util3d::projectDepthTo3D(data.depth(), newCorners[i].x, newCorners[i].y,
-							data.cx(), data.cy(), data.fx(), data.fy(), true);
-					if(pcl::isFinite(pt) &&
-						(this->getMaxDepth() == 0.0f || (
-						uIsInBounds(pt.x, -this->getMaxDepth(), this->getMaxDepth()) &&
-						uIsInBounds(pt.y, -this->getMaxDepth(), this->getMaxDepth()) &&
-						uIsInBounds(pt.z, 0.0f, this->getMaxDepth()))))
-					{
-						pt = util3d::transformPoint(pt, data.localTransform());
-						correspondencesLast->at(oi) = refCorners3D_->at(i);
-						correspondencesNew->at(oi) = pt;
-
-						if(this->isInfoDataFilled() && info)
-						{
-							info->refCorners[oi].pt = refCorners_[i];
-							info->newCorners[oi].pt = newCorners[i];
-						}
-
-						++oi;
-					}
-					++flowInliers;
-				}
-				else if(status[i])
-				{
-					++flowInliers;
-				}
-			}
-			UDEBUG("Flow inliers = %d, added inliers=%d", flowInliers, oi);
-
-			if(this->isInfoDataFilled() && info)
-			{
-				info->refCorners.resize(oi);
-				info->newCorners.resize(oi);
-			}
-			correspondencesLast->resize(oi);
-			correspondencesNew->resize(oi);
-			correspondences = oi;
-			if(correspondences >= this->getMinInliers())
-			{
-				std::vector<int> inliersV;
-				UTimer timerRANSAC;
-				output = util3d::transformFromXYZCorrespondences(
-						correspondencesNew,
-						correspondencesLast,
-						this->getInlierDistance(),
-						this->getIterations(),
-						this->getRefineIterations()>0, 3.0, this->getRefineIterations(),
-						&inliersV,
-						&variance);
-				UDEBUG("time RANSAC = %fs", timerRANSAC.ticks());
-
-				inliers = (int)inliersV.size();
-				if(inliers < this->getMinInliers())
-				{
-					output.setNull();
-					UWARN("Transform not valid (inliers = %d/%d)", inliers, correspondences);
-				}
-
-				if(this->isInfoDataFilled() && info)
-				{
-					info->cornerInliers = inliersV;
-				}
-			}
-			else
-			{
-				UWARN("Not enough correspondences (%d)", correspondences);
-			}
-		}
+		measurements = cv::Mat(6,1,CV_32FC1);
+		measurements.at<float>(0) = vx;     // x'
+		measurements.at<float>(1) = vy;     // y'
+		measurements.at<float>(2) = vz;     // z'
+		measurements.at<float>(3) = vroll;  // roll'
+		measurements.at<float>(4) = vpitch; // pitch'
+		measurements.at<float>(5) = vyaw;   // yaw'
 	}
 	else
 	{
-		//return Identity
-		output = Transform::getIdentity();
+		measurements = cv::Mat(3,1,CV_32FC1);
+		measurements.at<float>(0) = vx;     // x'
+		measurements.at<float>(1) = vy;     // y'
+		measurements.at<float>(2) = vyaw;   // yaw',
 	}
 
-	newCorners.clear();
-	if(!output.isNull())
-	{
-		// Copy or generate new keypoints
-		if(data.keypoints().size())
-		{
-			newCorners.resize(data.keypoints().size());
-			for(unsigned int i=0; i<data.keypoints().size(); ++i)
-			{
-				newCorners[i] = data.keypoints().at(i).pt;
-			}
-		}
-		else
-		{
-			// generate kpts
-			std::vector<cv::KeyPoint> newKtps;
-			cv::Rect roi = Feature2D::computeRoi(newFrame, this->getRoiRatios());
-			newKtps = feature2D_->generateKeypoints(newFrame, this->getMaxFeatures(), roi);
-			Feature2D::filterKeypointsByDepth(newKtps, data.depth(), this->getMaxDepth());
-			Feature2D::limitKeypoints(newKtps, this->getMaxFeatures());
+	// The "correct" phase that is going to use the predicted value and our measurement
+	UDEBUG("Correct");
+	const cv::Mat & estimated = kalmanFilter_.correct(measurements);
 
-			if(newKtps.size())
-			{
-				cv::KeyPoint::convert(newKtps, newCorners);
 
-				if(subPixWinSize_ > 0 && subPixIterations_ > 0)
-				{
-					cv::cornerSubPix(newFrame, newCorners,
-						cv::Size( subPixWinSize_, subPixWinSize_ ),
-						cv::Size( -1, -1 ),
-						cv::TermCriteria( CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, subPixIterations_, subPixEps_ ) );
-				}
-			}
-		}
-
-		if((int)newCorners.size() > this->getMinInliers())
-		{
-			// get 3D corners for the extracted 2D corners (not the ones refined by Optical Flow)
-			pcl::PointCloud<pcl::PointXYZ>::Ptr newCorners3D(new pcl::PointCloud<pcl::PointXYZ>);
-			newCorners3D->resize(newCorners.size());
-			std::vector<cv::Point2f> newCornersFiltered(newCorners.size());
-			int oi=0;
-			for(unsigned int i=0; i<newCorners.size(); ++i)
-			{
-				if(uIsInBounds(newCorners[i].x, 0.0f, float(data.depth().cols)) &&
-				   uIsInBounds(newCorners[i].y, 0.0f, float(data.depth().rows)))
-				{
-					pcl::PointXYZ pt = util3d::projectDepthTo3D(data.depth(), newCorners[i].x, newCorners[i].y,
-							data.cx(), data.cy(), data.fx(), data.fy(), true);
-					if(pcl::isFinite(pt) &&
-						(this->getMaxDepth() == 0.0f || (
-						uIsInBounds(pt.x, -this->getMaxDepth(), this->getMaxDepth()) &&
-						uIsInBounds(pt.y, -this->getMaxDepth(), this->getMaxDepth()) &&
-						uIsInBounds(pt.z, 0.0f, this->getMaxDepth()))))
-					{
-						pt = util3d::transformPoint(pt, data.localTransform());
-						newCorners3D->at(oi) = pt;
-						newCornersFiltered[oi] = newCorners[i];
-						++oi;
-					}
-				}
-			}
-			newCornersFiltered.resize(oi);
-			newCorners3D->resize(oi);
-			if((int)newCornersFiltered.size() > this->getMinInliers())
-			{
-				refFrame_ = newFrame;
-				refCorners_ = newCornersFiltered;
-				refCorners3D_ = newCorners3D;
-			}
-			else
-			{
-				UWARN("Too low 3D corners (%d/%d, minCorners=%d), ignoring new frame...",
-						(int)newCornersFiltered.size(), (int)refCorners3D_->size(), this->getMinInliers());
-				output.setNull();
-			}
-		}
-		else
-		{
-			UWARN("Too low 2D corners (%d), ignoring new frame...",
-					(int)newCorners.size());
-			output.setNull();
-		}
-	}
-
-	if(info)
-	{
-		info->variance = variance;
-		info->inliers = inliers;
-		info->features = (int)newCorners.size();
-		info->matches = correspondences;
-	}
-
-	UINFO("Odom update time = %fs lost=%s inliers=%d/%d, variance=%f, new corners=%d",
-			timer.elapsed(),
-			output.isNull()?"true":"false",
-			inliers,
-			correspondences,
-			variance,
-			(int)newCorners.size());
-	return output;
-}
-
-// OdometryICP
-OdometryICP::OdometryICP(int decimation,
-		float voxelSize,
-		int samples,
-		float maxCorrespondenceDistance,
-		int maxIterations,
-		float correspondenceRatio,
-		bool pointToPlane,
-		const ParametersMap & odometryParameter) :
-	Odometry(odometryParameter),
-	_decimation(decimation),
-	_voxelSize(voxelSize),
-	_samples(samples),
-	_maxCorrespondenceDistance(maxCorrespondenceDistance),
-	_maxIterations(maxIterations),
-	_correspondenceRatio(correspondenceRatio),
-	_pointToPlane(pointToPlane),
-	_previousCloudNormal(new pcl::PointCloud<pcl::PointNormal>),
-	_previousCloud(new pcl::PointCloud<pcl::PointXYZ>)
-{
-}
-
-void OdometryICP::reset(const Transform & initialPose)
-{
-	Odometry::reset(initialPose);
-	_previousCloudNormal.reset(new pcl::PointCloud<pcl::PointNormal>);
-	_previousCloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
-}
-
-// return not null transform if odometry is correctly computed
-Transform OdometryICP::computeTransform(const SensorData & data, OdometryInfo * info)
-{
-	UTimer timer;
-	Transform output;
-
-	bool hasConverged = false;
-	double variance = 0;
-	unsigned int minPoints = 100;
-	if(!data.depth().empty())
-	{
-		if(data.depth().type() == CV_8UC1)
-		{
-			UERROR("ICP 3D cannot be done on stereo images!");
-			return output;
-		}
-
-		pcl::PointCloud<pcl::PointXYZ>::Ptr newCloudXYZ = util3d::getICPReadyCloud(
-						data.depth(),
-						data.fx(),
-						data.fy(),
-						data.cx(),
-						data.cy(),
-						_decimation,
-						this->getMaxDepth(),
-						_voxelSize,
-						_samples,
-						data.localTransform());
-
-		if(_pointToPlane)
-		{
-			pcl::PointCloud<pcl::PointNormal>::Ptr newCloud = util3d::computeNormals(newCloudXYZ);
-
-			std::vector<int> indices;
-			newCloud = util3d::removeNaNNormalsFromPointCloud<pcl::PointNormal>(newCloud);
-			if(newCloudXYZ->size() != newCloud->size())
-			{
-				UWARN("removed nan normals...");
-			}
-
-			if(_previousCloudNormal->size() > minPoints && newCloud->size() > minPoints)
-			{
-				int correspondences = 0;
-				Transform transform = util3d::icpPointToPlane(newCloud,
-						_previousCloudNormal,
-						_maxCorrespondenceDistance,
-						_maxIterations,
-						&hasConverged,
-						&variance,
-						&correspondences);
-
-				// verify if there are enough correspondences
-				float correspondencesRatio = float(correspondences)/float(_previousCloudNormal->size()>newCloud->size()?_previousCloudNormal->size():newCloud->size());
-
-				if(!transform.isNull() && hasConverged &&
-		   	   	   correspondencesRatio >= _correspondenceRatio)
-				{
-					output = transform;
-					_previousCloudNormal = newCloud;
-				}
-				else
-				{
-					UWARN("Transform not valid (hasConverged=%s variance = %f)",
-							hasConverged?"true":"false", variance);
-				}
-			}
-			else if(newCloud->size() > minPoints)
-			{
-				output.setIdentity();
-				_previousCloudNormal = newCloud;
-			}
-		}
-		else
-		{
-			//point to point
-			if(_previousCloud->size() > minPoints && newCloudXYZ->size() > minPoints)
-			{
-				int correspondences = 0;
-				Transform transform = util3d::icp(newCloudXYZ,
-						_previousCloud,
-						_maxCorrespondenceDistance,
-						_maxIterations,
-						&hasConverged,
-						&variance,
-						&correspondences);
-
-				// verify if there are enough correspondences
-				float correspondencesRatio = float(correspondences)/float(_previousCloud->size()>newCloudXYZ->size()?_previousCloud->size():newCloudXYZ->size());
-
-				if(!transform.isNull() && hasConverged &&
-				   correspondencesRatio >= _correspondenceRatio)
-				{
-					output = transform;
-					_previousCloud = newCloudXYZ;
-				}
-				else
-				{
-					UWARN("Transform not valid (hasConverged=%s variance = %f)",
-							hasConverged?"true":"false", variance);
-				}
-			}
-			else if(newCloudXYZ->size() > minPoints)
-			{
-				output.setIdentity();
-				_previousCloud = newCloudXYZ;
-			}
-		}
-	}
-	else
-	{
-		UERROR("Depth is empty?!?");
-	}
-
-	if(info)
-	{
-		info->variance = variance;
-	}
-
-	UINFO("Odom update time = %fs hasConverged=%s variance=%f cloud=%d",
-			timer.elapsed(),
-			hasConverged?"true":"false",
-			variance,
-			(int)(_pointToPlane?_previousCloudNormal->size():_previousCloud->size()));
-
-	return output;
-}
-
-// OdometryThread
-OdometryThread::OdometryThread(Odometry * odometry) :
-	_odometry(odometry),
-	_resetOdometry(false)
-{
-	UASSERT(_odometry != 0);
-}
-
-OdometryThread::~OdometryThread()
-{
-	this->unregisterFromEventsManager();
-	this->join(true);
-	if(_odometry)
-	{
-		delete _odometry;
-	}
-	UDEBUG("");
-}
-
-void OdometryThread::handleEvent(UEvent * event)
-{
-	if(this->isRunning())
-	{
-		if(event->getClassName().compare("CameraEvent") == 0)
-		{
-			CameraEvent * cameraEvent = (CameraEvent*)event;
-			if(cameraEvent->getCode() == CameraEvent::kCodeImageDepth)
-			{
-				this->addData(cameraEvent->data());
-			}
-			else if(cameraEvent->getCode() == CameraEvent::kCodeNoMoreImages)
-			{
-				this->post(new CameraEvent()); // forward the event
-			}
-		}
-		else if(event->getClassName().compare("OdometryResetEvent") == 0)
-		{
-			_resetOdometry = true;
-		}
-	}
-}
-
-void OdometryThread::mainLoopKill()
-{
-	_dataAdded.release();
-}
-
-//============================================================
-// MAIN LOOP
-//============================================================
-void OdometryThread::mainLoop()
-{
-	if(_resetOdometry)
-	{
-		_odometry->reset();
-		_resetOdometry = false;
-	}
-
-	SensorData data;
-	getData(data);
-	if(data.isValid())
-	{
-		OdometryInfo info;
-		Transform pose = _odometry->process(data, &info);
-		data.setPose(pose, info.variance, info.variance); // a null pose notify that odometry could not be computed
-		this->post(new OdometryEvent(data, info));
-	}
-}
-
-void OdometryThread::addData(const SensorData & data)
-{
-	if(data.image().empty() || data.depthOrRightImage().empty() || data.fx() == 0.0f || data.fyOrBaseline() == 0.0f)
-	{
-		ULOGGER_ERROR("image empty !?");
-		return;
-	}
-
-	bool notify = true;
-	_dataMutex.lock();
-	{
-		notify = !_dataBuffer.isValid();
-		_dataBuffer = data;
-	}
-	_dataMutex.unlock();
-
-	if(notify)
-	{
-		_dataAdded.release();
-	}
-}
-
-void OdometryThread::getData(SensorData & data)
-{
-	_dataAdded.acquire();
-	_dataMutex.lock();
-	{
-		if(_dataBuffer.isValid())
-		{
-			data = _dataBuffer;
-			_dataBuffer = SensorData();
-		}
-	}
-	_dataMutex.unlock();
+	vx = estimated.at<float>(3);                      // x'
+	vy = estimated.at<float>(4);                      // y'
+	vz = _force3DoF?0.0f:estimated.at<float>(5);      // z'
+	vroll = _force3DoF?0.0f:estimated.at<float>(12);  // roll'
+	vpitch = _force3DoF?0.0f:estimated.at<float>(13); // pitch'
+	vyaw = estimated.at<float>(_force3DoF?7:14);      // yaw'
 }
 
 } /* namespace rtabmap */

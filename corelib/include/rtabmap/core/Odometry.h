@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -30,193 +30,75 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <rtabmap/core/RtabmapExp.h>
 
-#include <rtabmap/utilite/UThread.h>
-#include <rtabmap/utilite/UEventsHandler.h>
-#include <rtabmap/utilite/UEvent.h>
-#include <rtabmap/utilite/UMutex.h>
-#include <rtabmap/utilite/USemaphore.h>
-
-#include <rtabmap/core/Parameters.h>
-
+#include <rtabmap/core/Transform.h>
 #include <rtabmap/core/SensorData.h>
-#include <rtabmap/core/OdometryInfo.h>
-
-#include <opencv2/opencv.hpp>
-
-#include <pcl/common/eigen.h>
-#include <pcl/point_types.h>
-#include <pcl/point_cloud.h>
-
-class UTimer;
+#include <rtabmap/core/Parameters.h>
 
 namespace rtabmap {
 
-class Feature2D;
+class OdometryInfo;
+class ParticleFilter;
 
 class RTABMAP_EXP Odometry
 {
 public:
-	virtual ~Odometry() {}
-	Transform process(const SensorData & data, OdometryInfo * info = 0);
+	enum Type {
+		kTypeUndef = -1,
+		kTypeLocalMap = 0,
+		kTypeF2F = 1
+	};
+
+public:
+	static Odometry * create(const ParametersMap & parameters);
+	static Odometry * create(Type & type, const ParametersMap & parameters = ParametersMap());
+
+public:
+	virtual ~Odometry();
+	Transform process(SensorData & data, OdometryInfo * info = 0);
+	Transform process(SensorData & data, const Transform & guess, OdometryInfo * info = 0);
 	virtual void reset(const Transform & initialPose = Transform::getIdentity());
 
 	//getters
 	const Transform & getPose() const {return _pose;}
-	int getMaxFeatures() const  {return _maxFeatures;}
-	const std::string & getRoiRatios() const {return _roiRatios;}
-	int getMinInliers() const {return _minInliers;}
-	float getInlierDistance() const {return _inlierDistance;}
-	int getIterations() const {return _iterations;}
-	int getRefineIterations() const {return _refineIterations;}
-	float getMaxDepth() const {return _maxDepth;}
 	bool isInfoDataFilled() const {return _fillInfoData;}
-	bool isPnPEstimationUsed() const {return _pnpEstimation;}
-	double  getPnPReprojError() const {return _pnpReprojError;}
-	int  getPnPFlags() const {return _pnpFlags;}
+	const Transform & previousVelocityTransform() const {return previousVelocityTransform_;}
+	double previousStamp() const {return previousStamp_;}
 
 private:
-	virtual Transform computeTransform(const SensorData & image, OdometryInfo * info = 0) = 0;
+	virtual Transform computeTransform(SensorData & data, const Transform & guess = Transform(), OdometryInfo * info = 0) = 0;
+
+	void initKalmanFilter(const Transform & initialPose = Transform::getIdentity(), float vx=0.0f, float vy=0.0f, float vz=0.0f, float vroll=0.0f, float vpitch=0.0f, float vyaw=0.0f);
+	void predictKalmanFilter(float dt, float * vx=0, float * vy=0, float * vz=0, float * vroll=0, float * vpitch=0, float * vyaw=0);
+	void updateKalmanFilter(float & vx, float & vy, float & vz, float & vroll, float & vpitch, float & vyaw);
 
 private:
-	int _maxFeatures;
-	std::string _roiRatios;
-	int _minInliers;
-	float _inlierDistance;
-	int _iterations;
-	int _refineIterations;
-	float _maxDepth;
 	int _resetCountdown;
-	bool _force2D;
+	bool _force3DoF;
+	bool _holonomic;
+	bool guessFromMotion_;
+	int _filteringStrategy;
+	int _particleSize;
+	float _particleNoiseT;
+	float _particleLambdaT;
+	float _particleNoiseR;
+	float _particleLambdaR;
 	bool _fillInfoData;
-	bool _pnpEstimation;
-	double _pnpReprojError;
-	int _pnpFlags;
+	float _kalmanProcessNoise;
+	float _kalmanMeasurementNoise;
+	int _imageDecimation;
+	bool _alignWithGround;
 	Transform _pose;
 	int _resetCurrentCount;
+	double previousStamp_;
+	Transform previousVelocityTransform_;
+	Transform previousGroundTruthPose_;
+	float distanceTravelled_;
+
+	std::vector<ParticleFilter *> particleFilters_;
+	cv::KalmanFilter kalmanFilter_;
 
 protected:
 	Odometry(const rtabmap::ParametersMap & parameters);
-};
-
-class Memory;
-
-class RTABMAP_EXP OdometryBOW : public Odometry
-{
-public:
-	OdometryBOW(const rtabmap::ParametersMap & parameters = rtabmap::ParametersMap());
-	virtual ~OdometryBOW();
-
-	virtual void reset(const Transform & initialPose = Transform::getIdentity());
-	const std::multimap<int, pcl::PointXYZ> & getLocalMap() const {return localMap_;}
-	const Memory * getMemory() const {return _memory;}
-
-private:
-	virtual Transform computeTransform(const SensorData & image, OdometryInfo * info = 0);
-
-private:
-	//Parameters
-	int _localHistoryMaxSize;
-
-	Memory * _memory;
-	std::multimap<int, pcl::PointXYZ> localMap_;
-};
-
-class RTABMAP_EXP OdometryOpticalFlow : public Odometry
-{
-public:
-	OdometryOpticalFlow(const rtabmap::ParametersMap & parameters = rtabmap::ParametersMap());
-	virtual ~OdometryOpticalFlow();
-
-	virtual void reset(const Transform & initialPose = Transform::getIdentity());
-
-	const cv::Mat & getLastFrame() const {return refFrame_;}
-	const std::vector<cv::Point2f> & getLastCorners() const {return refCorners_;}
-	const pcl::PointCloud<pcl::PointXYZ>::Ptr & getLastCorners3D() const {return refCorners3D_;}
-
-private:
-	virtual Transform computeTransform(const SensorData & image, OdometryInfo * info = 0);
-	Transform computeTransformStereo(const SensorData & image, OdometryInfo * info);
-	Transform computeTransformRGBD(const SensorData & image, OdometryInfo * info);
-	Transform computeTransformMono(const SensorData & image, OdometryInfo * info);
-private:
-	//Parameters:
-	int flowWinSize_;
-	int flowIterations_;
-	double flowEps_;
-	int flowMaxLevel_;
-
-	int stereoWinSize_;
-	int stereoIterations_;
-	double stereoEps_;
-	int stereoMaxLevel_;
-	float stereoMaxSlope_;
-
-	int subPixWinSize_;
-	int subPixIterations_;
-	double subPixEps_;
-
-	Feature2D * feature2D_;
-
-	cv::Mat refFrame_;
-	cv::Mat refRightFrame_;
-	std::vector<cv::Point2f> refCorners_;
-	pcl::PointCloud<pcl::PointXYZ>::Ptr refCorners3D_;
-};
-
-class RTABMAP_EXP OdometryICP : public Odometry
-{
-public:
-	OdometryICP(int decimation = 4,
-			float voxelSize = 0.005f,
-			int samples = 0,
-			float maxCorrespondenceDistance = 0.05f,
-			int maxIterations = 30,
-			float correspondenceRatio = 0.7f,
-			bool pointToPlane = true,
-			const ParametersMap & odometryParameter = rtabmap::ParametersMap());
-	virtual void reset(const Transform & initialPose = Transform::getIdentity());
-
-private:
-	virtual Transform computeTransform(const SensorData & image, OdometryInfo * info = 0);
-
-private:
-	int _decimation;
-	float _voxelSize;
-	float _samples;
-	float _maxCorrespondenceDistance;
-	int	_maxIterations;
-	float _correspondenceRatio;
-	bool _pointToPlane;
-
-	pcl::PointCloud<pcl::PointNormal>::Ptr _previousCloudNormal; // for point ot plane
-	pcl::PointCloud<pcl::PointXYZ>::Ptr _previousCloud; // for point to point
-};
-
-class RTABMAP_EXP OdometryThread : public UThread, public UEventsHandler {
-public:
-	// take ownership of Odometry
-	OdometryThread(Odometry * odometry);
-	virtual ~OdometryThread();
-
-protected:
-	virtual void handleEvent(UEvent * event);
-
-private:
-	void mainLoopKill();
-
-	//============================================================
-	// MAIN LOOP
-	//============================================================
-	void mainLoop();
-	void addData(const SensorData & data);
-	void getData(SensorData & data);
-
-private:
-	USemaphore _dataAdded;
-	UMutex _dataMutex;
-	SensorData _dataBuffer;
-	Odometry * _odometry;
-	bool _resetOdometry;
 };
 
 } /* namespace rtabmap */

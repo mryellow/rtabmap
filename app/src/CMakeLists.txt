@@ -5,7 +5,7 @@ SET(headers_ui
 )
 
 #This will generate moc_* for Qt
-IF("${RTABMAP_QT_VERSION}" STREQUAL "4")
+IF(QT4_FOUND)
     QT4_WRAP_CPP(moc_srcs ${headers_ui})
 ELSE()
     QT5_WRAP_CPP(moc_srcs ${headers_ui})
@@ -25,9 +25,9 @@ SET(INCLUDE_DIRS
     ${PCL_INCLUDE_DIRS}
 )
 
-IF("${RTABMAP_QT_VERSION}" STREQUAL "4")
+IF(QT4_FOUND)
     INCLUDE(${QT_USE_FILE})
-ENDIF()
+ENDIF(QT4_FOUND)
 
 SET(LIBRARIES
     ${QT_LIBRARIES} 
@@ -73,9 +73,9 @@ ELSE()
   ADD_EXECUTABLE(rtabmap ${SRC_FILES})
 ENDIF()
 TARGET_LINK_LIBRARIES(rtabmap rtabmap_core rtabmap_gui rtabmap_utilite ${LIBRARIES})
-IF("${RTABMAP_QT_VERSION}" STREQUAL "5")
+IF(Qt5_FOUND)
     QT5_USE_MODULES(rtabmap Widgets Core Gui Svg PrintSupport)
-ENDIF()
+ENDIF(Qt5_FOUND)
 
 IF(APPLE AND BUILD_AS_BUNDLE)
   SET_TARGET_PROPERTIES(rtabmap PROPERTIES
@@ -137,11 +137,25 @@ IF((APPLE AND BUILD_AS_BUNDLE) OR WIN32)
   # Install needed Qt plugins by copying directories from the qt installation
   # One can cull what gets copied by using 'REGEX "..." EXCLUDE'
   # Exclude debug libraries
-  INSTALL(DIRECTORY "${QT_PLUGINS_DIR}/imageformats" 
+  IF(QT_PLUGINS_DIR)
+    INSTALL(DIRECTORY "${QT_PLUGINS_DIR}/imageformats"
           DESTINATION ${plugin_dest_dir}/plugins 
           COMPONENT runtime 
           REGEX ".*d4.dll" EXCLUDE
           REGEX ".*d4.a" EXCLUDE)
+  ELSE()
+	#Qt5
+	foreach(plugin ${Qt5Gui_PLUGINS})
+		get_target_property(plugin_loc ${plugin} LOCATION)
+		get_filename_component(plugin_dir ${plugin_loc} DIRECTORY)
+		string(REPLACE "plugins" ";" loc_list ${plugin_dir})
+		list(GET loc_list 1 plugin_type)
+	    #MESSAGE(STATUS "Qt5 plugin \"${plugin_loc}\" installed in \"${plugin_dest_dir}/plugins${plugin_type}\"")
+		INSTALL(FILES ${plugin_loc}
+          DESTINATION ${plugin_dest_dir}/plugins${plugin_type}
+          COMPONENT runtime)
+	endforeach()
+  ENDIF()
   
   # install a qt.conf file
   # this inserts some cmake code into the install script to write the file
@@ -167,6 +181,7 @@ IF((APPLE AND BUILD_AS_BUNDLE) OR WIN32)
   # To find dependencies, cmake use "otool" on Apple and "dumpbin" on Windows (make sure you have one of them).
   install(CODE "
    file(GLOB_RECURSE QTPLUGINS \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${plugin_dest_dir}/plugins/*${CMAKE_SHARED_LIBRARY_SUFFIX}\")
+    set(BU_CHMOD_BUNDLE_ITEMS ON)
     include(\"BundleUtilities\")
     fixup_bundle(\"${APPS}\" \"\${QTPLUGINS}\" \"${DIRS}\")
   " COMPONENT runtime)

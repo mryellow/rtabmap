@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -33,6 +33,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UEventsHandler.h>
 #include <QDialog>
 #include <rtabmap/core/SensorData.h>
+#include <rtabmap/core/Parameters.h>
+
+class QSpinBox;
+class QCheckBox;
+class QPushButton;
 
 namespace rtabmap {
 
@@ -43,7 +48,9 @@ class RTABMAPGUI_EXP CameraViewer : public QDialog, public UEventsHandler
 {
 	Q_OBJECT
 public:
-	CameraViewer(QWidget * parent = 0);
+	CameraViewer(
+		QWidget * parent = 0,
+		const ParametersMap & parameters = ParametersMap());
 	virtual ~CameraViewer();
 
 public slots:
@@ -55,6 +62,12 @@ private:
 	ImageView* imageView_;
 	CloudViewer* cloudView_;
 	bool processingImages_;
+	QSpinBox * decimationSpin_;
+	int validDecimationValue_;
+	ParametersMap parameters_;
+	QPushButton * pause_;
+	QCheckBox * showCloudCheckbox_;
+	QCheckBox * showScanCheckbox_;
 };
 
 } /* namespace rtabmap */

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -50,9 +50,9 @@ class QLabel;
 
 namespace rtabmap
 {
-class Memory;
+class DBDriver;
 class ImageView;
-class Signature;
+class SensorData;
 class CloudViewer;
 
 class RTABMAPGUI_EXP DatabaseViewer : public QMainWindow
@@ -60,10 +60,11 @@ class RTABMAPGUI_EXP DatabaseViewer : public QMainWindow
 	Q_OBJECT
 
 public:
-	DatabaseViewer(QWidget * parent = 0);
+	DatabaseViewer(const QString & ini = QString(), QWidget * parent = 0);
 	virtual ~DatabaseViewer();
 	bool openDatabase(const QString & path);
 	bool isSavedMaximized() const {return savedMaximized_;}
+	void showCloseButton(bool visible = true);
 
 protected:
 	virtual void showEvent(QShowEvent* anEvent);
@@ -81,17 +82,22 @@ private slots:
 	void extractImages();
 	void generateLocalGraph();
 	void generateTOROGraph();
+	void generateG2OGraph();
 	void view3DMap();
+	void view3DLaserScans();
 	void generate3DMap();
+	void generate3DLaserScans();
 	void detectMoreLoopClosures();
 	void refineAllNeighborLinks();
 	void refineAllLoopClosureLinks();
 	void refineVisuallyAllNeighborLinks();
 	void refineVisuallyAllLoopClosureLinks();
+	void resetAllChanges();
 	void sliderAValueChanged(int);
 	void sliderBValueChanged(int);
 	void sliderAMoved(int);
 	void sliderBMoved(int);
+	void update3dView();
 	void sliderNeighborValueChanged(int);
 	void sliderLoopValueChanged(int);
 	void sliderIterationsValueChanged(int);
@@ -103,6 +109,10 @@ private slots:
 	void resetConstraint();
 	void rejectConstraint();
 	void updateConstraintView();
+	void updateLoggerLevel();
+	void updateStereo();
+	void notifyParametersChanged(const QStringList &);
+	void setupMainLayout(int vertical);
 
 private:
 	QString getIniFilePath() const;
@@ -119,8 +129,11 @@ private:
 				rtabmap::ImageView * view,
 				rtabmap::CloudViewer * view3D,
 				QLabel * labelId,
-				bool updateConstraintView = true);
-	void updateStereo(const Signature * data);
+				QLabel * labelMapId,
+				QLabel * labelPose,
+				QLabel * labeCalib,
+				bool updateConstraintView);
+	void updateStereo(const SensorData * data);
 	void updateWordsMatching();
 	void updateConstraintView(
 			const rtabmap::Link & link,
@@ -138,20 +151,28 @@ private:
 	std::multimap<int, rtabmap::Link> updateLinksWithModifications(
 			const std::multimap<int, rtabmap::Link> & edgeConstraints);
 	void updateLoopClosuresSlider(int from = 0, int to = 0);
-	void refineConstraint(int from, int to, bool updateGraph);
-	void refineConstraintVisually(int from, int to, bool updateGraph);
+	void refineConstraint(int from, int to,  bool silent, bool updateGraph);
+	void refineConstraintVisually(int from, int to,  bool silent, bool updateGraph);
 	bool addConstraint(int from, int to, bool silent, bool updateGraph);
 
 private:
 	Ui_DatabaseViewer * ui_;
+	CloudViewer * constraintsViewer_;
+	CloudViewer * cloudViewerA_;
+	CloudViewer * cloudViewerB_;
+	CloudViewer * stereoViewer_;
 	QList<int> ids_;
+	std::map<int, int> mapIds_;
 	QMap<int, int> idToIndex_;
 	QList<rtabmap::Link> neighborLinks_;
 	QList<rtabmap::Link> loopLinks_;
-	rtabmap::Memory * memory_;
+	rtabmap::DBDriver * dbDriver_;
 	QString pathDatabase_;
+	std::string databaseFileName_;
 	std::list<std::map<int, rtabmap::Transform> > graphes_;
+	std::multimap<int, rtabmap::Link> graphLinks_;
 	std::map<int, rtabmap::Transform> poses_;
+	std::map<int, rtabmap::Transform> groundTruthPoses_;
 	std::multimap<int, rtabmap::Link> links_;
 	std::multimap<int, rtabmap::Link> linksRefined_;
 	std::multimap<int, rtabmap::Link> linksAdded_;
@@ -160,6 +181,7 @@ private:
 
 	bool savedMaximized_;
 	bool firstCall_;
+	QString iniFilePath_;
 };
 
 }

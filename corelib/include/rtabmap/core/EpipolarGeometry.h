@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -85,6 +85,16 @@ public:
 			cv::Mat & t);
 
 	static cv::Mat findFFromCalibratedStereoCameras(double fx, double fy, double cx, double cy, double Tx, double Ty);
+
+
+	/**
+	 * if a=[1 2 3 4 6], b=[1 2 4 5 6], results= [(1,1) (2,2) (4,4) (6,6)]
+	 * realPairsCount = 4
+	 */
+	static int findPairs(
+			const std::map<int, cv::KeyPoint> & wordsA,
+			const std::map<int, cv::KeyPoint> & wordsB,
+			std::list<std::pair<int, std::pair<cv::KeyPoint, cv::KeyPoint> > > & pairs);
 
 	/**
 	 * if a=[1 2 3 4 6 6], b=[1 1 2 4 5 6 6], results= [(1,1a) (2,2) (4,4) (6a,6a) (6b,6b)]

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -45,7 +45,7 @@ class RTABMAPGUI_EXP LoopClosureViewer : public QWidget {
 	Q_OBJECT
 
 public:
-	LoopClosureViewer(QWidget * parent);
+	LoopClosureViewer(QWidget * parent = 0);
 	virtual ~LoopClosureViewer();
 
 	void setData(const Signature & sA, const Signature & sB); // sB contains loop transform as pose() from sA
@@ -56,8 +56,8 @@ public:
 public slots:
 	void setDecimation(int decimation) {decimation_ = decimation;}
 	void setMaxDepth(int maxDepth) {maxDepth_ = maxDepth;}
-	void setSamples(int samples) {samples_ = samples;}
-	void updateView(const Transform & AtoB = Transform());
+	void setMinDepth(int minDepth) {minDepth_ = minDepth;}
+	void updateView(const Transform & AtoB = Transform(), const ParametersMap & parameters = ParametersMap());
 
 protected:
 	virtual void showEvent(QShowEvent * event);
@@ -71,7 +71,7 @@ private:
 
 	int decimation_;
 	float maxDepth_;
-	int samples_;
+	float minDepth_;
 };
 
 } /* namespace rtabmap */

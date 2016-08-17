@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -40,17 +40,17 @@ namespace rtabmap
 class UserDataEvent : public UEvent
 {
 public:
-	UserDataEvent(const std::vector<unsigned char> & data) :
+	UserDataEvent(const cv::Mat & data) :
 		UEvent(0),
 		data_(data)
 	{}
 	~UserDataEvent() {}
 	virtual std::string getClassName() const {return "UserDataEvent";}
 
-	const std::vector<unsigned char> & data() const {return data_;}
+	const cv::Mat & data() const {return data_;}
 
 private:
-	std::vector<unsigned char> data_;
+	cv::Mat data_;
 };
 
 }

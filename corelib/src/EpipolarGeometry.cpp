@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -151,13 +151,18 @@ int inFrontOfBothCameras(const cv::Mat & x, const cv::Mat & xp, const cv::Mat & 
 	p.at<double>(2,3) = T.at<double>(2,0);
 
 	cv::Mat pts4D;
+	//std::vector<double> reprojErrors;
+	//pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+	//EpipolarGeometry::triangulatePoints(x, xp, p0, p, cloud, reprojErrors);
 	cv::triangulatePoints(p0, p, x, xp, pts4D);
 
     //http://en.wikipedia.org/wiki/Essential_matrix#3D_points_from_corresponding_image_points
 	int nValid = 0;
     for(int i=0; i<x.cols; ++i)
     {
+    	// the five to ignore when all points are super close to the camera
         if(pts4D.at<double>(2,i)/pts4D.at<double>(3,i) > 5)
+    	//if(cloud->at(i).z > 5)
         {
         	++nValid;
         }
@@ -210,7 +215,7 @@ cv::Mat EpipolarGeometry::findPFromE(const cv::Mat & E,
 	cv::Mat r = u*w*vt;
 	if(cv::determinant(r)+1.0 < 1e-09) {
 		//according to http://en.wikipedia.org/wiki/Essential_matrix#Showing_that_it_is_valid
-		UWARN("det(R) == -1 [%f]: flip E's sign", cv::determinant(r));
+		UDEBUG("det(R) == -1 [%f]: flip E's sign", cv::determinant(r));
 		e = -E;
 		svd(e,cv::SVD::MODIFY_A);
 		u = svd.u;
@@ -373,14 +378,10 @@ void EpipolarGeometry::findRTFromP(
 		cv::Mat & t)
 {
 	UASSERT(p.cols == 4 && p.rows == 3);
-	UDEBUG("");
 	r = cv::Mat(p, cv::Range(0,3), cv::Range(0,3));
-	UDEBUG("");
 	//r = -r.inv();
-	UDEBUG("r=%d %d, t=%d", r.cols, r.rows, p.col(3).rows);
 	//t = r*p.col(3);
 	t = p.col(3);
-	UDEBUG("");
 }
 
 cv::Mat EpipolarGeometry::findFFromCalibratedStereoCameras(double fx, double fy, double cx, double cy, double Tx, double Ty)
@@ -403,6 +404,29 @@ cv::Mat EpipolarGeometry::findFFromCalibratedStereoCameras(double fx, double fy,
 	cv::Mat E = tx*R;
 
 	return K.inv().t()*E*K.inv();
+}
+
+/**
+ * if a=[1 2 3 4 6], b=[1 2 4 5 6], results= [(1,1) (2,2) (4,4) (6,6)]
+ * realPairsCount = 4
+ */
+int EpipolarGeometry::findPairs(
+		const std::map<int, cv::KeyPoint> & wordsA,
+		const std::map<int, cv::KeyPoint> & wordsB,
+		std::list<std::pair<int, std::pair<cv::KeyPoint, cv::KeyPoint> > > & pairs)
+{
+	int realPairsCount = 0;
+	pairs.clear();
+	for(std::map<int, cv::KeyPoint>::const_iterator i=wordsA.begin(); i!=wordsA.end(); ++i)
+	{
+		std::map<int, cv::KeyPoint>::const_iterator ptB = wordsB.find(i->first);
+		if(ptB != wordsB.end())
+		{
+			pairs.push_back(std::pair<int, std::pair<cv::KeyPoint, cv::KeyPoint> >(i->first, std::pair<cv::KeyPoint, cv::KeyPoint>(i->second, ptB->second)));
+			++realPairsCount;
+		}
+	}
+	return realPairsCount;
 }
 
 /**

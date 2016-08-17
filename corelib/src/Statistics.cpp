@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -42,7 +42,8 @@ Statistics::Statistics() :
 	_extended(0),
 	_refImageId(0),
 	_loopClosureId(0),
-	_localLoopClosureId(0)
+	_proximiyDetectionId(0),
+	_currentGoalId(0)
 {
 	_defaultDataInitialized = true;
 }

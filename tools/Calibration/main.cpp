@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -25,8 +25,9 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include "rtabmap/core/Camera.h"
+#include "rtabmap/core/CameraRGB.h"
 #include "rtabmap/core/CameraRGBD.h"
+#include "rtabmap/core/CameraStereo.h"
 #include "rtabmap/core/CameraThread.h"
 #include "rtabmap/utilite/ULogger.h"
 #include "rtabmap/utilite/UConversion.h"
@@ -128,11 +129,12 @@ int main(int argc, char * argv[])
 	UINFO("Using device %d", device);
 	UINFO("Stereo: %s", stereo?"true":"false");
 
-	rtabmap::Camera * cameraUsb = 0;
-	rtabmap::CameraRGBD * camera = 0;
+	bool switchImages = false;
+
+	rtabmap::Camera * camera = 0;
 	if(driver == -1)
 	{
-		cameraUsb = new rtabmap::CameraVideo(device);
+		camera = new rtabmap::CameraVideo(device);
 	}
 	else if(driver == 0)
 	{
@@ -181,7 +183,8 @@ int main(int argc, char * argv[])
 			UERROR("Not built with Freenect2 support...");
 			exit(-1);
 		}
-		camera = new rtabmap::CameraFreenect2(0, rtabmap::CameraFreenect2::kTypeRGBIR);
+		switchImages = true;
+		camera = new rtabmap::CameraFreenect2(0, rtabmap::CameraFreenect2::kTypeColorIR);
 	}
 	else if(driver == 6)
 	{
@@ -208,17 +211,7 @@ int main(int argc, char * argv[])
 
 	rtabmap::CameraThread * cameraThread = 0;
 
-	if(cameraUsb)
-	{
-		if(!cameraUsb->init())
-		{
-			printf("Camera init failed!\n");
-			delete cameraUsb;
-			exit(1);
-		}
-		cameraThread = new rtabmap::CameraThread(cameraUsb);
-	}
-	else if(camera)
+	if(camera)
 	{
 		if(!camera->init(""))
 		{
@@ -230,7 +223,7 @@ int main(int argc, char * argv[])
 	}
 
 	QApplication app(argc, argv);
-	rtabmap::CalibrationDialog dialog(stereo);
+	rtabmap::CalibrationDialog dialog(stereo, ".", switchImages);
 	dialog.registerToEventsManager();
 
 	dialog.show();

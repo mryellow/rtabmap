@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2010-2014, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
+Copyright (c) 2010-2016, Mathieu Labbe - IntRoLab - Universite de Sherbrooke
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -35,20 +35,21 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QtCore/QSet>
 #include "rtabmap/core/RtabmapEvent.h"
 #include "rtabmap/core/SensorData.h"
-#include "rtabmap/core/OdometryInfo.h"
+#include "rtabmap/core/OdometryEvent.h"
+#include "rtabmap/core/CameraInfo.h"
 #include "rtabmap/gui/PreferencesDialog.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/PolygonMesh.h>
+#include <pcl/pcl_base.h>
+#include <pcl/TextureMesh.h>
 
 namespace rtabmap {
 class CameraThread;
-class DBReader;
-class CameraOpenni;
-class CameraFreenect;
 class OdometryThread;
 class CloudViewer;
+class LoopClosureViewer;
 }
 
 class QGraphicsScene;
@@ -62,11 +63,13 @@ class AboutDialog;
 class Plot;
 class PdfPlotCurve;
 class StatsToolBox;
-class DetailedProgressDialog;
+class ProgressDialog;
 class TwistGridWidget;
 class ExportCloudsDialog;
+class ExportScansDialog;
 class PostProcessingDialog;
 class DataRecorder;
+class OctoMap;
 
 class RTABMAPGUI_EXP MainWindow : public QMainWindow, public UEventsHandler
 {
@@ -86,13 +89,6 @@ public:
 		kMonitoringPaused
 	};
 
-	enum SrcType {
-		kSrcUndefined,
-		kSrcVideo,
-		kSrcImages,
-		kSrcStream
-	};
-
 public:
 	/**
 	 * @param prefDialog If NULL, a default dialog is created. This
@@ -110,6 +106,8 @@ public:
 
 public slots:
 	void processStats(const rtabmap::Statistics & stat);
+	void updateCacheFromDatabase(const QString & path);
+	void openDatabase(const QString & path);
 
 protected:
 	virtual void closeEvent(QCloseEvent* event);
@@ -131,18 +129,21 @@ private slots:
 	void startDetection();
 	void pauseDetection();
 	void stopDetection();
+	void notifyNoMoreImages();
 	void printLoopClosureIds();
-	void generateMap();
-	void generateLocalMap();
-	void generateTOROMap();
+	void generateGraphDOT();
+	void exportPosesRaw();
+	void exportPosesRGBDSLAM();
+	void exportPosesKITTI();
+	void exportPosesTORO();
+	void exportPosesG2O();
+	void exportImages();
+	void exportOctomap();
 	void postProcessing();
 	void deleteMemory();
 	void openWorkingDirectory();
 	void updateEditMenu();
-	void selectImages();
-	void selectVideo();
 	void selectStream();
-	void selectDatabase();
 	void selectOpenni();
 	void selectFreenect();
 	void selectOpenniCv();
@@ -151,27 +152,39 @@ private slots:
 	void selectFreenect2();
 	void selectStereoDC1394();
 	void selectStereoFlyCapture2();
+	void selectStereoZed();
+	void selectStereoUsb();
 	void dumpTheMemory();
 	void dumpThePrediction();
+	void sendGoal();
+	void sendWaypoints();
+	void postGoal(const QString & goal);
+	void cancelGoal();
+	void label();
+	void updateCacheFromDatabase();
 	void downloadAllClouds();
 	void downloadPoseGraph();
+	void anchorCloudsToGroundTruth();
 	void clearTheCache();
-	void saveFigures();
-	void loadFigures();
 	void openPreferences();
+	void openPreferencesSource();
+	void setDefaultViews();
 	void selectScreenCaptureFormat(bool checked);
 	void takeScreenshot();
 	void updateElapsedTime();
-	void processOdometry(const rtabmap::SensorData & data, const rtabmap::OdometryInfo & info);
+	void processCameraInfo(const rtabmap::CameraInfo & info);
+	void processOdometry(const rtabmap::OdometryEvent & odom, bool dataIgnored);
 	void applyPrefSettings(PreferencesDialog::PANEL_FLAGS flags);
 	void applyPrefSettings(const rtabmap::ParametersMap & parameters);
 	void processRtabmapEventInit(int status, const QString & info);
 	void processRtabmapEvent3DMap(const rtabmap::RtabmapEvent3DMap & event);
+	void processRtabmapGlobalPathEvent(const rtabmap::RtabmapGlobalPathEvent & event);
+	void processRtabmapLabelErrorEvent(int id, const QString & label);
+	void processRtabmapGoalStatusEvent(int status);
 	void changeImgRateSetting();
 	void changeDetectionRateSetting();
 	void changeTimeLimitSetting();
 	void changeMappingMode();
-	void captureScreen();
 	void setAspectRatio(int w, int h);
 	void setAspectRatio16_9();
 	void setAspectRatio16_10();
@@ -181,9 +194,11 @@ private slots:
 	void setAspectRatio480p();
 	void setAspectRatio720p();
 	void setAspectRatio1080p();
+	void setAspectRatioCustom();
 	void exportGridMap();
 	void exportScans();
 	void exportClouds();
+	void exportBundlerFormat();
 	void viewScans();
 	void viewClouds();
 	void resetOdometry();
@@ -191,14 +206,19 @@ private slots:
 	void dataRecorder();
 	void dataRecorderDestroyed();
 	void updateNodeVisibility(int, bool);
+	void updateGraphView();
 
 signals:
 	void statsReceived(const rtabmap::Statistics &);
-	void odometryReceived(const rtabmap::SensorData &, const rtabmap::OdometryInfo &);
+	void cameraInfoReceived(const rtabmap::CameraInfo &);
+	void odometryReceived(const rtabmap::OdometryEvent &, bool);
 	void thresholdsChanged(int, int);
 	void stateChanged(MainWindow::State);
 	void rtabmapEventInitReceived(int status, const QString & info);
 	void rtabmapEvent3DMapReceived(const rtabmap::RtabmapEvent3DMap & event);
+	void rtabmapGlobalPathEventReceived(const rtabmap::RtabmapGlobalPathEvent & event);
+	void rtabmapLabelErrorReceived(int id, const QString & label);
+	void rtabmapGoalStatusEventReceived(int status);
 	void imgRateChanged(double);
 	void detectionRateChanged(double);
 	void timeLimitChanged(float);
@@ -209,67 +229,52 @@ signals:
 
 private:
 	void update3DMapVisibility(bool cloudsShown, bool scansShown);
-	void updateMapCloud(const std::map<int, Transform> & poses, const Transform & pose, const std::multimap<int, Link> & constraints, const std::map<int, int> & mapIds, bool verboseProgress = false);
-	void createAndAddCloudToMap(int nodeId, const Transform & pose, int mapId);
+	void updateMapCloud(
+			const std::map<int, Transform> & poses,
+			const std::multimap<int, Link> & constraints,
+			const std::map<int, int> & mapIds,
+			const std::map<int, std::string> & labels,
+			const std::map<int, Transform> & groundTruths,
+			bool verboseProgress = false);
+	std::pair<pcl::PointCloud<pcl::PointXYZRGB>::Ptr, pcl::IndicesPtr> createAndAddCloudToMap(int nodeId,	const Transform & pose, int mapId);
+	void createAndAddProjectionMap(
+			const pcl::PointCloud<pcl::PointXYZRGB>::Ptr & cloud,
+			const pcl::IndicesPtr & indices,
+			int nodeId,
+			const Transform & pose,
+			bool updateOctomap = false);
 	void createAndAddScanToMap(int nodeId, const Transform & pose, int mapId);
+	void createAndAddFeaturesToMap(int nodeId, const Transform & pose, int mapId);
+	Transform alignPosesToGroundTruth(std::map<int, Transform> & poses, const std::map<int, Transform> & groundTruth);
 	void drawKeypoints(const std::multimap<int, cv::KeyPoint> & refWords, const std::multimap<int, cv::KeyPoint> & loopWords);
 	void setupMainLayout(bool vertical);
 	void updateSelectSourceMenu();
-
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr getAssembledCloud(
-			const std::map<int, Transform> & poses,
-			float assembledVoxelSize,
-			bool regenerateClouds,
-			int regenerateDecimation,
-			float regenerateVoxelSize,
-			float regenerateMaxDepth) const;
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr createCloud(
-			int id,
-			const cv::Mat & rgb,
-			const cv::Mat & depth,
-			float fx,
-			float fy,
-			float cx,
-			float cy,
-			const Transform & localTransform,
-			const Transform & pose,
-			float voxelSize,
-			int decimation,
-			float maxDepth) const;
-	std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr > getClouds(
-			const std::map<int, Transform> & poses,
-			bool regenerateClouds,
-			int regenerateDecimation,
-			float regenerateVoxelSize,
-			float regenerateMaxDepth) const;
-
-	bool getExportedScans(std::map<int, pcl::PointCloud<pcl::PointXYZ>::Ptr > & scans);
-	bool getExportedClouds(std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr> & clouds, std::map<int, pcl::PolygonMesh::Ptr> & meshes, bool toSave);
-	void saveClouds(const std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr> & clouds, bool binaryMode = true);
-	void saveMeshes(const std::map<int, pcl::PolygonMesh::Ptr> & meshes, bool binaryMode = true);
-	void saveScans(const std::map<int, pcl::PointCloud<pcl::PointXYZ>::Ptr> & clouds, bool binaryMode = true);
+	void applyPrefSettings(const rtabmap::ParametersMap & parameters, bool postParamEvent);
+	void saveFigures();
+	void loadFigures();
+	void exportPoses(int format);
+	QString captureScreen(bool cacheInRAM = false);
 
 private:
 	Ui_mainWindow * _ui;
 
 	State _state;
 	rtabmap::CameraThread * _camera;
-	rtabmap::DBReader * _dbReader;
 	rtabmap::OdometryThread * _odomThread;
-
-	SrcType _srcType;
-	QString _srcPath;
 
 	//Dialogs
 	PreferencesDialog * _preferencesDialog;
 	AboutDialog * _aboutDialog;
-	ExportCloudsDialog * _exportDialog;
+	ExportCloudsDialog * _exportCloudsDialog;
+	ExportScansDialog * _exportScansDialog;
 	PostProcessingDialog * _postProcessingDialog;
 	DataRecorder * _dataRecorder;
 
 	QSet<int> _lastIds;
 	int _lastId;
+	double _firstStamp;
 	bool _processingStatistics;
+	bool _processingDownloadedMap;
 	bool _odometryReceived;
 	QString _newDatabasePath;
 	QString _newDatabasePathOutput;
@@ -278,19 +283,31 @@ private:
 	bool _odomImageShow;
 	bool _odomImageDepthShow;
 	bool _savedMaximized;
+	QStringList _waypoints;
+	int _waypointsIndex;
 
 	QMap<int, Signature> _cachedSignatures;
+	long _cachedMemoryUsage;
 	std::map<int, Transform> _currentPosesMap; // <nodeId, pose>
+	std::map<int, Transform> _currentGTPosesMap; // <nodeId, pose>
 	std::multimap<int, Link> _currentLinksMap; // <nodeFromId, link>
 	std::map<int, int> _currentMapIds;   // <nodeId, mapId>
-	std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr > _createdClouds;
-	std::map<int, pcl::PointCloud<pcl::PointXYZ>::Ptr > _createdScans;
+	std::map<int, std::string> _currentLabels; // <nodeId, label>
+	std::map<int, std::pair<pcl::PointCloud<pcl::PointXYZRGB>::Ptr, pcl::IndicesPtr> > _cachedClouds;
+	long _createdCloudsMemoryUsage;
+	std::pair<int, std::pair<std::pair<pcl::PointCloud<pcl::PointXYZRGB>::Ptr, pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr>, pcl::IndicesPtr> > _previousCloud; // used for subtraction
+
+	std::map<int, cv::Mat> _createdScans;
 	std::map<int, std::pair<cv::Mat, cv::Mat> > _projectionLocalMaps; // <ground, obstacles>
 	std::map<int, std::pair<cv::Mat, cv::Mat> > _gridLocalMaps; // <ground, obstacles>
+
+	rtabmap::OctoMap * _octomap;
+
+	std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr> _createdFeatures;
+
 	Transform _odometryCorrection;
 	Transform _lastOdomPose;
 	bool _processingOdometry;
-	double _lastOdomInfoUpdateTime;
 
 	QTimer * _oneSecondTimer;
 	QTime * _elapsedTime;
@@ -300,11 +317,16 @@ private:
 	PdfPlotCurve * _likelihoodCurve;
 	PdfPlotCurve * _rawLikelihoodCurve;
 
-	DetailedProgressDialog * _initProgressDialog;
+	ProgressDialog * _initProgressDialog;
+
+	CloudViewer * _cloudViewer;
+	LoopClosureViewer * _loopClosureViewer;
 
 	QString _graphSavingFileName;
-	QString _toroSavingFileName;
+	QMap<int, QString> _exportPosesFileName;
 	bool _autoScreenCaptureOdomSync;
+	bool _autoScreenCaptureRAM;
+	QMap<QString, QByteArray> _autoScreenCaptureCachedImages;
 
 	QVector<int> _refIds;
 	QVector<int> _loopClosureIds;
